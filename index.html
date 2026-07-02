@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>スマホドラレコ</title>
+<link rel="manifest" href="dorareko-manifest.json">
+<link rel="icon" type="image/png" href="dorareko-icon-192.png">
+<link rel="apple-touch-icon" href="dorareko-icon-192.png">
+<meta name="theme-color" content="#0d1117">
+<!-- 地図ライブラリ（Leaflet）と地図データ（OpenStreetMap）は無料・APIキー不要 -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  /* ===== 全体のデザイン（防犯カメラと同じダーク系）===== */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    min-height: 100vh;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  header {
+    background: #161b22;
+    padding: 12px 16px;
+    text-align: center;
+    border-bottom: 1px solid #30363d;
+  }
+  header h1 { font-size: 18px; }
+  header .sub { font-size: 12px; color: #8b949e; margin-top: 3px; }
+
+  /* ===== カメラ映像エリア ===== */
+  .videoWrap {
+    position: relative;
+    background: #000;
+    margin: 12px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 3px solid #30363d;
+    transition: border-color 0.2s;
+  }
+  .videoWrap.rec { border-color: #f85149; }
+  .videoWrap.impact { border-color: #d29922; box-shadow: 0 0 18px rgba(210,153,34,0.7); }
+  #preview { width: 100%; display: block; }
+
+  /* 録画中の赤いバッジ */
+  .badge {
+    position: absolute;
+    top: 8px; right: 8px;
+    background: rgba(0,0,0,0.55);
+    padding: 5px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    display: none;
+  }
+  .badge.on {
+    display: block;
+    background: rgba(248,81,73,0.85);
+    animation: blink 1.2s infinite;
+  }
+  @keyframes blink { 50% { opacity: 0.5; } }
+
+  /* ===== ボタン ===== */
+  button {
+    font-family: inherit;
+    cursor: pointer;
+    border: none;
+    border-radius: 10px;
+    font-size: 15px;
+    padding: 14px;
+    color: #fff;
+  }
+  .controls {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 10px;
+    margin: 0 12px 12px;
+  }
+  .btn-rec { background: #238636; font-weight: bold; font-size: 17px; }
+  .btn-rec.recording { background: #da3633; }
+  .btn-rec:active { opacity: 0.85; }
+  .btn-event {
+    background: #d29922;
+    color: #0d1117;
+    font-weight: bold;
+  }
+  .btn-event:active { background: #e3b341; }
+  .btn-event:disabled { background: #30363d; color: #6e7681; }
+
+  /* ===== パネル（設定・録画一覧）===== */
+  .panel {
+    background: #161b22;
+    margin: 12px;
+    padding: 14px;
+    border-radius: 12px;
+    border: 1px solid #30363d;
+  }
+  .panel h2 { font-size: 15px; margin-bottom: 10px; color: #58a6ff; }
+  label { display: block; font-size: 13px; margin: 8px 0 5px; color: #8b949e; }
+  select {
+    width: 100%;
+    padding: 10px;
+    font-size: 16px;
+    border-radius: 8px;
+    border: 1px solid #30363d;
+    background: #0d1117;
+    color: #e6edf3;
+  }
+  .hint { font-size: 12px; color: #6e7681; margin-top: 6px; line-height: 1.6; }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .row input[type="checkbox"] { width: 20px; height: 20px; }
+  .row span { font-size: 14px; }
+
+  /* ===== 録画一覧 ===== */
+  .clip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 4px;
+    border-bottom: 1px solid #21262d;
+    font-size: 13px;
+  }
+  .clip .info { flex: 1; line-height: 1.5; }
+  .clip .lock { color: #d29922; font-weight: bold; }
+  .clip button { padding: 8px 10px; font-size: 13px; border-radius: 8px; }
+  .b-play { background: #1f6feb; }
+  .b-save { background: #238636; }
+  .b-lock { background: #21262d; border: 1px solid #30363d; }
+  .b-del  { background: #da3633; }
+  #empty { color: #6e7681; font-size: 13px; padding: 8px 0; }
+
+  /* ===== 再生画面（モーダル）===== */
+  #playerModal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.9);
+    z-index: 10;
+    flex-direction: column;
+    justify-content: center;
+    padding: 16px;
+  }
+  #playerModal.show { display: flex; }
+  #playerVideo { width: 100%; border-radius: 10px; background: #000; }
+  #playerClose { margin-top: 12px; background: #6e7681; }
+
+  /* ===== ライブ地図（今どこを走っているか）===== */
+  .btn-map {
+    display: block;
+    width: calc(100% - 24px);
+    margin: 0 12px 12px;
+    background: #21262d;
+    border: 1px solid #30363d;
+  }
+  .btn-map.active { background: #1f6feb; border-color: #1f6feb; }
+  #mapWrap {
+    display: none;
+    flex-direction: column;
+    height: 55vh;
+    margin: 0 12px 12px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 3px solid #30363d;
+    background: #161b22;
+  }
+  /* 目的地の入力欄と案内ボタン */
+  #navBox { display: flex; gap: 8px; padding: 8px; }
+  #navBox input {
+    flex: 1;
+    min-width: 0;
+    padding: 10px;
+    font-size: 16px;
+    border-radius: 8px;
+    border: 1px solid #30363d;
+    background: #0d1117;
+    color: #e6edf3;
+  }
+  #navBox button { background: #238636; padding: 10px 14px; white-space: nowrap; font-size: 14px; }
+  #navBox button.navOn { background: #da3633; }
+  #mapArea { position: relative; flex: 1; }
+  #map { width: 100%; height: 100%; }
+  /* 次の曲がり角の案内バナー */
+  #navBanner {
+    display: none;
+    position: absolute;
+    left: 10px; top: 10px;
+    z-index: 1000;
+    max-width: 60%;
+    background: rgba(31,111,235,0.92);
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: bold;
+    line-height: 1.5;
+  }
+  /* 地図の上に速度を大きく表示 */
+  #mapSpeed {
+    position: absolute;
+    right: 10px; top: 10px;
+    z-index: 1000;
+    background: rgba(0,0,0,0.65);
+    color: #fff;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 20px;
+    font-weight: bold;
+  }
+
+  /* ステータス表示 */
+  #status {
+    margin: 0 12px 8px;
+    font-size: 13px;
+    color: #8b949e;
+    text-align: center;
+    min-height: 18px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🚗 スマホドラレコ</h1>
+  <div class="sub">日時・速度つきループ録画 / 衝撃検知でイベント保存</div>
+</header>
+
+<!-- カメラ映像（この見た目のまま録画される） -->
+<div class="videoWrap" id="videoWrap">
+  <canvas id="preview" width="1280" height="720"></canvas>
+  <div class="badge" id="recBadge">● REC</div>
+</div>
+
+<div id="status">「録画スタート」を押すとカメラとGPSの許可を聞かれます</div>
+
+<div class="controls">
+  <button class="btn-rec" id="btnRec">▶ 録画スタート</button>
+  <button class="btn-event" id="btnEvent" disabled>⚡ イベント保存</button>
+</div>
+
+<!-- ライブ地図（今どこを走っているか）＋簡易ナビ -->
+<button class="btn-map" id="btnMap">🗺 地図を表示（今どこ？）</button>
+<div id="mapWrap">
+  <div id="navBox">
+    <input type="text" id="navDest" placeholder="目的地（例：名古屋駅）">
+    <button id="btnNav">🧭 案内</button>
+  </div>
+  <div id="mapArea">
+    <div id="map"></div>
+    <div id="mapSpeed">-- km/h</div>
+    <div id="navBanner"></div>
+  </div>
+</div>
+
+<!-- 録画一覧 -->
+<div class="panel">
+  <h2>📼 録画一覧</h2>
+  <div id="clipList"></div>
+  <div id="empty">まだ録画はありません</div>
+</div>
+
+<!-- 設定 -->
+<div class="panel">
+  <h2>⚙ 設定</h2>
+  <label>ループ録画で残す長さ（古いものから自動削除）</label>
+  <select id="selKeep">
+    <option value="10">最新10分ぶん</option>
+    <option value="30" selected>最新30分ぶん</option>
+    <option value="60">最新60分ぶん</option>
+  </select>
+  <div class="row">
+    <input type="checkbox" id="chkImpact" checked>
+    <span>衝撃を感じたら自動でイベント保存する</span>
+  </div>
+  <div class="hint">
+    ・録画は1分ごとのファイルに区切って保存されます<br>
+    ・「イベント保存」した録画（🔒）は自動削除されません<br>
+    ・録画中は画面を消さないでください（消えると録画が止まります）<br>
+    ・電池を多く使うので、充電しながらの使用がおすすめです<br>
+    ・地図・ナビにはネット接続（モバイル通信）が必要です<br>
+    ・ナビは簡易版です（渋滞情報なし）。音声はスマホの音量をONに
+  </div>
+</div>
+
+<!-- 再生モーダル -->
+<div id="playerModal">
+  <video id="playerVideo" controls playsinline></video>
+  <button id="playerClose">閉じる</button>
+</div>
+
+<script>
+/* =========================================================
+   スマホドラレコ
+   仕組み：
+   1. カメラ映像を「キャンバス」に描き、日時・速度を焼き込む
+   2. キャンバスの映像＋マイク音声を1分ごとに録画して保存
+   3. 保存先は端末内のデータベース（IndexedDB）
+   4. 古い録画は自動削除（ループ録画）。イベント保存分は残す
+   ========================================================= */
+
+// ---------- 画面の部品 ----------
+const canvas   = document.getElementById("preview");
+const ctx      = canvas.getContext("2d");
+const btnRec   = document.getElementById("btnRec");
+const btnEvent = document.getElementById("btnEvent");
+const statusEl = document.getElementById("status");
+const videoWrap = document.getElementById("videoWrap");
+const recBadge = document.getElementById("recBadge");
+
+// ---------- 状態 ----------
+let stream = null;        // カメラ＋マイクの生データ
+let videoEl = null;       // カメラ映像を受ける裏方のvideo要素
+let recorder = null;      // 録画係（MediaRecorder）
+let recording = false;    // 録画中かどうか
+let chunks = [];          // 録画データのかけら置き場
+let segmentTimer = null;  // 1分ごとに区切るタイマー
+let segmentStart = null;  // 今のセグメントの開始時刻
+let protectThis = false;  // 今録画中のぶんを保護するか（イベント保存）
+let mimeType = "";        // 録画形式（スマホによって mp4 / webm）
+let wakeLock = null;      // 画面を消さないためのロック
+let gpsWatch = null;      // GPS監視の番号
+let speedKmh = null;      // 現在の速度（km/h）GPSから
+let lastImpact = 0;       // 最後に衝撃検知した時刻（連発防止）
+
+// ライブ地図の状態
+let mapVisible = false;   // 地図を表示中か
+let map = null;           // 地図本体（Leaflet）
+let carMarker = null;     // 現在地の青い印
+let trackLine = null;     // 走った道の軌跡（青い線）
+
+const SEGMENT_MS = 60 * 1000;   // 1セグメント = 1分
+const SEG_LIMIT_MB = 0;         // （未使用・将来の容量制限用）
+
+// ---------- 設定の保存と読み込み ----------
+const selKeep = document.getElementById("selKeep");
+const chkImpact = document.getElementById("chkImpact");
+selKeep.value = localStorage.getItem("dr_keep") || "30";
+chkImpact.checked = localStorage.getItem("dr_impact") !== "off";
+selKeep.onchange = () => localStorage.setItem("dr_keep", selKeep.value);
+chkImpact.onchange = () => localStorage.setItem("dr_impact", chkImpact.checked ? "on" : "off");
+
+// ---------- 端末内データベース（IndexedDB）----------
+let db = null;
+function openDB() {
+  return new Promise((ok, ng) => {
+    const req = indexedDB.open("dorareko", 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore("segments", { keyPath: "id", autoIncrement: true });
+    };
+    req.onsuccess = () => { db = req.result; ok(); };
+    req.onerror = () => ng(req.error);
+  });
+}
+// 録画1本を保存
+function dbAdd(seg) {
+  return new Promise((ok, ng) => {
+    const tx = db.transaction("segments", "readwrite");
+    tx.objectStore("segments").add(seg);
+    tx.oncomplete = ok;
+    tx.onerror = () => ng(tx.error);
+  });
+}
+// 全部の録画情報を取得（映像データ本体は除いて軽く）
+function dbList() {
+  return new Promise((ok, ng) => {
+    const out = [];
+    const tx = db.transaction("segments", "readonly");
+    tx.objectStore("segments").openCursor().onsuccess = (e) => {
+      const cur = e.target.result;
+      if (cur) {
+        const v = cur.value;
+        out.push({ id: v.id, time: v.time, size: v.size, protected: v.protected, type: v.type });
+        cur.continue();
+      } else ok(out);
+    };
+    tx.onerror = () => ng(tx.error);
+  });
+}
+// 1本取り出す（再生・ダウンロード用）
+function dbGet(id) {
+  return new Promise((ok, ng) => {
+    const req = db.transaction("segments", "readonly").objectStore("segments").get(id);
+    req.onsuccess = () => ok(req.result);
+    req.onerror = () => ng(req.error);
+  });
+}
+// 削除
+function dbDelete(id) {
+  return new Promise((ok, ng) => {
+    const tx = db.transaction("segments", "readwrite");
+    tx.objectStore("segments").delete(id);
+    tx.oncomplete = ok;
+    tx.onerror = () => ng(tx.error);
+  });
+}
+// 保護フラグの切り替え
+function dbSetProtected(id, flag) {
+  return new Promise((ok, ng) => {
+    const tx = db.transaction("segments", "readwrite");
+    const store = tx.objectStore("segments");
+    store.get(id).onsuccess = (e) => {
+      const v = e.target.result;
+      if (v) { v.protected = flag; store.put(v); }
+    };
+    tx.oncomplete = ok;
+    tx.onerror = () => ng(tx.error);
+  });
+}
+
+// ---------- 録画スタート／ストップ ----------
+btnRec.onclick = async () => {
+  if (recording) stopRecording();
+  else startRecording();
+};
+
+async function startRecording() {
+  try {
+    statusEl.textContent = "カメラを準備中...";
+
+    // 1. カメラ（後ろ向き）とマイクを起動
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: true
+    });
+
+    // 2. 裏方のvideo要素で映像を受ける
+    videoEl = document.createElement("video");
+    videoEl.srcObject = stream;
+    videoEl.muted = true;
+    videoEl.playsInline = true;
+    await videoEl.play();
+
+    // キャンバスの大きさをカメラに合わせる
+    canvas.width  = videoEl.videoWidth  || 1280;
+    canvas.height = videoEl.videoHeight || 720;
+
+    // 3. GPSで速度と現在地を取る（許可されなくても録画は続ける）
+    startGPS(); // すでに地図用に動いていれば二重には起動しない
+
+    // 4. 衝撃検知（iPhoneは許可ボタンが必要なのでここで聞く）
+    if (chkImpact.checked) await startImpactSensor();
+
+    // 5. キャンバス映像＋マイク音声を合体して録画の元にする
+    const canvasStream = canvas.captureStream(30);
+    const mixed = new MediaStream([
+      ...canvasStream.getVideoTracks(),
+      ...stream.getAudioTracks()
+    ]);
+
+    // スマホが対応している録画形式を選ぶ（iPhoneはmp4、Androidはwebmが多い）
+    const candidates = [
+      "video/mp4;codecs=avc1", "video/mp4",
+      "video/webm;codecs=vp9,opus", "video/webm"
+    ];
+    mimeType = candidates.find(t => MediaRecorder.isTypeSupported(t)) || "";
+
+    // 6. 描画ループ開始（映像に日時・速度を焼き込む）
+    recording = true;
+    drawLoop();
+
+    // 7. 録画係を開始 ＆ 1分ごとに区切るタイマー
+    startSegment(mixed);
+    segmentTimer = setInterval(() => rotateSegment(mixed), SEGMENT_MS);
+
+    // 8. 画面を消さないようにロック
+    await keepScreenOn();
+
+    // 見た目を録画中に
+    btnRec.textContent = "■ 録画ストップ";
+    btnRec.classList.add("recording");
+    btnEvent.disabled = false;
+    videoWrap.classList.add("rec");
+    recBadge.classList.add("on");
+    statusEl.textContent = "録画中（1分ごとに保存されます）";
+  } catch (err) {
+    statusEl.textContent = "エラー: " + err.message + "（カメラの許可を確認してください）";
+    recording = false;
+  }
+}
+
+function stopRecording() {
+  recording = false;
+  clearInterval(segmentTimer);
+  if (recorder && recorder.state !== "inactive") recorder.stop(); // 最後のぶんも保存される
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  updateGPSState(); // 地図を表示中ならGPSは続ける・そうでなければ止める
+  if (wakeLock) { wakeLock.release().catch(()=>{}); wakeLock = null; }
+  window.removeEventListener("devicemotion", onMotion);
+
+  btnRec.textContent = "▶ 録画スタート";
+  btnRec.classList.remove("recording");
+  btnEvent.disabled = true;
+  videoWrap.classList.remove("rec");
+  recBadge.classList.remove("on");
+  statusEl.textContent = "録画を停止しました";
+}
+
+// ---------- 1分ごとのセグメント録画 ----------
+function startSegment(mixed) {
+  chunks = [];
+  segmentStart = new Date();
+  protectThis = false;
+  recorder = new MediaRecorder(mixed, mimeType ? { mimeType } : undefined);
+  recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+  recorder.onstop = saveSegment;
+  recorder.start();
+}
+
+// 1分経ったら：今の録画を保存 → すぐ次の録画を開始
+function rotateSegment(mixed) {
+  if (recorder && recorder.state !== "inactive") recorder.stop();
+  if (recording) startSegment(mixed);
+}
+
+// 録画1本ぶんを端末内に保存して、古いものを掃除
+async function saveSegment() {
+  if (chunks.length === 0) return;
+  const blob = new Blob(chunks, { type: mimeType || "video/webm" });
+  chunks = [];
+  await dbAdd({
+    time: segmentStart.toISOString(),
+    blob: blob,
+    size: blob.size,
+    type: blob.type,
+    protected: protectThis
+  });
+  await cleanupOld();
+  renderList();
+}
+
+// ループ録画の掃除：設定した本数を超えたら、古い「未保護」の録画から削除
+async function cleanupOld() {
+  const keep = parseInt(selKeep.value, 10);
+  const list = await dbList();
+  const unprotected = list.filter(s => !s.protected).sort((a, b) => a.time.localeCompare(b.time));
+  let over = list.length - keep;
+  for (const seg of unprotected) {
+    if (over <= 0) break;
+    await dbDelete(seg.id);
+    over--;
+  }
+}
+
+// ---------- 映像への焼き込み（日時・速度）----------
+function drawLoop() {
+  if (!recording) return;
+  // カメラ映像をそのまま描く
+  ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+
+  // 下に黒い帯
+  const H = canvas.height;
+  const bandH = Math.round(H * 0.075);
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(0, H - bandH, canvas.width, bandH);
+
+  // 日時（左下）
+  const now = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  const stamp = `${now.getFullYear()}/${pad(now.getMonth()+1)}/${pad(now.getDate())} ` +
+                `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `bold ${Math.round(bandH * 0.55)}px sans-serif`;
+  ctx.textBaseline = "middle";
+  ctx.fillText(stamp, 12, H - bandH / 2);
+
+  // 速度（右下）GPSが取れていれば表示
+  const spd = (speedKmh === null) ? "GPS待ち" : `${speedKmh} km/h`;
+  const w = ctx.measureText(spd).width;
+  ctx.fillText(spd, canvas.width - w - 12, H - bandH / 2);
+
+  requestAnimationFrame(drawLoop);
+}
+
+// ---------- GPS（速度と現在地の取得）----------
+// 録画中 または 地図表示中 だけGPSを動かす（電池の節約）
+function updateGPSState() {
+  const need = recording || mapVisible;
+  if (need && gpsWatch === null) startGPS();
+  if (!need && gpsWatch !== null) {
+    navigator.geolocation.clearWatch(gpsWatch);
+    gpsWatch = null;
+    speedKmh = null;
+  }
+}
+
+function startGPS() {
+  if (!navigator.geolocation || gpsWatch !== null) return;
+  gpsWatch = navigator.geolocation.watchPosition(
+    (pos) => {
+      // speed は「秒速（m/s）」で来るので時速に変換。取れない機種はnull
+      if (pos.coords.speed !== null && !isNaN(pos.coords.speed)) {
+        speedKmh = Math.round(pos.coords.speed * 3.6);
+      }
+      // 地図の現在地マークとナビを更新
+      handlePosition(pos.coords.latitude, pos.coords.longitude);
+    },
+    () => { /* GPS拒否・失敗でも録画は続行 */ },
+    { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+  );
+}
+
+// ---------- ライブ地図（OpenStreetMap・無料）----------
+const btnMap = document.getElementById("btnMap");
+const mapWrap = document.getElementById("mapWrap");
+const mapSpeedEl = document.getElementById("mapSpeed");
+
+btnMap.onclick = () => {
+  mapVisible = !mapVisible;
+  mapWrap.style.display = mapVisible ? "flex" : "none";
+  btnMap.textContent = mapVisible ? "🗺 地図を隠す" : "🗺 地図を表示（今どこ？）";
+  btnMap.classList.toggle("active", mapVisible);
+  if (mapVisible) {
+    if (!map) initMap();
+    // 隠れていた地図はサイズ計算をやり直す必要がある（Leafletのお約束）
+    setTimeout(() => map.invalidateSize(), 100);
+  }
+  updateGPSState();
+};
+
+function initMap() {
+  // 最初は日本全体。GPSが取れたら現在地に飛ぶ
+  map = L.map("map", { zoomControl: false }).setView([36.0, 137.5], 5);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors"
+  }).addTo(map);
+  // 走った道の軌跡（青い線）
+  trackLine = L.polyline([], { color: "#1f6feb", weight: 5, opacity: 0.8 }).addTo(map);
+  // 現在地の印（青い丸）
+  carMarker = L.circleMarker([36.0, 137.5], {
+    radius: 10, color: "#ffffff", weight: 3, fillColor: "#1f6feb", fillOpacity: 1
+  }).addTo(map);
+  // 地図をタップした場所を目的地にできる
+  map.on("click", (e) => {
+    if (navActive) return;
+    if (!lastPos) { alert("GPSの現在地がまだ取れていません。少し待ってください"); return; }
+    if (confirm("タップした場所を目的地にして案内を開始しますか？")) {
+      beginNav(e.latlng.lat, e.latlng.lng).catch(() =>
+        alert("ルート検索に失敗しました。もう一度試してください"));
+    }
+  });
+}
+
+let lastPos = null;     // 最後にGPSで取れた現在地 [緯度, 経度]
+let mapFirstFix = true; // 最初にGPSが取れたら大きくズームする
+
+// GPSで位置が取れるたびに呼ばれる入口
+function handlePosition(lat, lng) {
+  lastPos = [lat, lng];
+  onNavPosition(lat, lng); // ナビ中なら案内を更新（地図を隠していても動く）
+  updateMap(lat, lng);     // 地図の見た目を更新
+}
+
+function updateMap(lat, lng) {
+  if (!map || !mapVisible) return;
+  carMarker.setLatLng([lat, lng]);
+  trackLine.addLatLng([lat, lng]);
+  map.setView([lat, lng], mapFirstFix ? 16 : map.getZoom());
+  mapFirstFix = false;
+  mapSpeedEl.textContent = (speedKmh === null ? "--" : speedKmh) + " km/h";
+}
+
+/* =========================================================
+   簡易ナビ
+   仕組み：
+   1. 目的地を入力 → 無料の地名検索（Nominatim）で場所を探す
+   2. 無料のルート検索（OSRM）で道順を取得 → オレンジ線で表示
+   3. GPSで曲がり角に近づいたら、画面と音声で案内
+   ※渋滞情報はなし。ルート検索はお試しサーバーなので
+     たまに遅いことがあります
+   ========================================================= */
+const btnNav = document.getElementById("btnNav");
+const navDest = document.getElementById("navDest");
+const navBanner = document.getElementById("navBanner");
+
+let navActive = false;   // ナビ中かどうか
+let navDestPos = null;   // 目的地 [緯度, 経度]
+let navSteps = [];       // 曲がり角のリスト（OSRMから）
+let nextStepIdx = 0;     // 次に案内する曲がり角の番号
+let routeCoords = [];    // ルートの形（線の点の集まり）
+let routeLine = null;    // 地図上のオレンジ線
+let destMarker = null;   // 目的地のピン
+let announced = { far: false, near: false }; // 案内済みフラグ（300m/60m）
+let offRouteCount = 0;   // ルートから外れた回数（再検索の判定用）
+
+// 2地点間の距離（メートル）を計算する定番の式
+function haversine(lat1, lng1, lat2, lng2) {
+  const R = 6371000, r = Math.PI / 180;
+  const a = Math.sin((lat2 - lat1) * r / 2) ** 2 +
+    Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin((lng2 - lng1) * r / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+// 距離を読みやすく（1.2km / 300m）
+const fmtDist = m => m >= 1000 ? (m / 1000).toFixed(1) + "km" : Math.max(10, Math.round(m / 10) * 10) + "m";
+
+// 曲がる方向を日本語にする
+function jpTurn(step) {
+  const t = step.maneuver.type, m = step.maneuver.modifier || "";
+  if (t === "arrive") return "目的地";
+  if (t === "roundabout" || t === "rotary") return "環状交差点";
+  const names = {
+    "left": "左方向", "slight left": "斜め左方向", "sharp left": "大きく左方向",
+    "right": "右方向", "slight right": "斜め右方向", "sharp right": "大きく右方向",
+    "straight": "直進", "uturn": "Uターン"
+  };
+  return names[m] || "直進";
+}
+function jpArrow(step) {
+  const m = step.maneuver.modifier || "";
+  if (step.maneuver.type === "arrive") return "🏁";
+  if (m.includes("left")) return "↰";
+  if (m.includes("right")) return "↱";
+  if (m === "uturn") return "↩";
+  return "⬆";
+}
+
+// 音声で読み上げる（スマホ内蔵の日本語音声・無料）
+function speak(text) {
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "ja-JP";
+    speechSynthesis.speak(u);
+  } catch { /* 非対応でも画面の案内だけで続行 */ }
+}
+
+// 「🧭 案内」ボタン：目的地を検索してナビ開始（ナビ中なら終了）
+btnNav.onclick = async () => {
+  if (navActive) { stopNav(); return; }
+  const q = navDest.value.trim();
+  if (!q) { alert("目的地を入力してください（地図をタップでも指定できます）"); return; }
+  if (!lastPos) { alert("GPSの現在地がまだ取れていません。少し待ってからもう一度押してください"); return; }
+  btnNav.disabled = true; btnNav.textContent = "検索中…";
+  try {
+    // 無料の地名検索（日本国内・一番近い候補を使う）
+    const res = await fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=ja&countrycodes=jp&q=" + encodeURIComponent(q));
+    const hits = await res.json();
+    if (!hits.length) { alert("「" + q + "」が見つかりませんでした。住所や有名な施設名で試してください"); return; }
+    const name = hits[0].display_name.split(",").slice(0, 3).join("、");
+    if (!confirm("ここへ案内しますか？\n" + name)) return;
+    await beginNav(parseFloat(hits[0].lat), parseFloat(hits[0].lon));
+  } catch (e) {
+    alert("ルート検索に失敗しました。電波の良い場所でもう一度試してください");
+  } finally {
+    btnNav.disabled = false;
+    if (!navActive) btnNav.textContent = "🧭 案内";
+  }
+};
+
+// ナビ開始：ルートを取ってきて線を引き、案内を始める
+async function beginNav(lat, lng) {
+  navDestPos = [lat, lng];
+  await fetchRoute(lastPos, navDestPos, false);
+  navActive = true;
+  btnNav.textContent = "■ 案内終了";
+  btnNav.classList.add("navOn");
+  navBanner.style.display = "block";
+  if (destMarker) destMarker.remove();
+  destMarker = L.marker([lat, lng]).addTo(map);
+  speak("案内を開始します");
+}
+
+// 無料ルート検索（OSRM）から道順を取得
+async function fetchRoute(from, to, isReroute) {
+  const url = "https://router.project-osrm.org/route/v1/driving/" +
+    from[1] + "," + from[0] + ";" + to[1] + "," + to[0] +
+    "?overview=full&geometries=geojson&steps=true";
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.code !== "Ok" || !data.routes.length) throw new Error("route not found");
+  const route = data.routes[0];
+  routeCoords = route.geometry.coordinates; // [経度, 緯度] の並びに注意
+  navSteps = route.legs[0].steps;
+  nextStepIdx = Math.min(1, navSteps.length - 1); // 0番は「出発」なので次の曲がり角から
+  announced = { far: false, near: false };
+  offRouteCount = 0;
+  if (routeLine) routeLine.remove();
+  routeLine = L.geoJSON(route.geometry, { style: { color: "#d29922", weight: 6, opacity: 0.85 } }).addTo(map);
+  if (!isReroute && map) map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
+  return route;
+}
+
+// ナビ終了（到着 or 手動）
+function stopNav() {
+  navActive = false;
+  navSteps = []; routeCoords = [];
+  if (routeLine) { routeLine.remove(); routeLine = null; }
+  if (destMarker) { destMarker.remove(); destMarker = null; }
+  navBanner.style.display = "none";
+  btnNav.textContent = "🧭 案内";
+  btnNav.classList.remove("navOn");
+  speechSynthesis.cancel();
+}
+
+// GPSが更新されるたびの案内処理
+function onNavPosition(lat, lng) {
+  if (!navActive || navSteps.length === 0) return;
+  const step = navSteps[nextStepIdx];
+  const [slng, slat] = step.maneuver.location; // OSRMは[経度,緯度]の順
+  const d = haversine(lat, lng, slat, slng);
+
+  // 画面の案内バナー：「↰ 300m先 左方向　残り2.1km」
+  let remain = d;
+  for (let i = nextStepIdx; i < navSteps.length; i++) remain += navSteps[i].distance;
+  navBanner.textContent = `${jpArrow(step)} ${fmtDist(d)}先 ${jpTurn(step)}　残り${fmtDist(remain)}`;
+
+  // 音声案内（300m手前と直前の2回）
+  if (d < 300 && !announced.far) {
+    announced.far = true;
+    speak(`およそ300メートル先、${jpTurn(step)}です`);
+  }
+  if (d < 60 && !announced.near) {
+    announced.near = true;
+    speak(step.maneuver.type === "arrive" ? "まもなく目的地です" : `まもなく、${jpTurn(step)}です`);
+  }
+
+  // 曲がり角を通過したら次の案内へ／目的地なら終了
+  if (d < 30) {
+    if (step.maneuver.type === "arrive" || nextStepIdx >= navSteps.length - 1) {
+      speak("目的地に到着しました。お疲れさまでした");
+      navBanner.textContent = "🏁 目的地に到着しました";
+      setTimeout(stopNav, 5000);
+      return;
+    }
+    nextStepIdx++;
+    announced = { far: false, near: false };
+  }
+
+  // ルートから100m以上外れた状態が3回続いたら再検索
+  let minD = Infinity;
+  for (const [clng, clat] of routeCoords) {
+    const dd = haversine(lat, lng, clat, clng);
+    if (dd < minD) minD = dd;
+  }
+  if (minD > 100) offRouteCount++; else offRouteCount = 0;
+  if (offRouteCount >= 3) {
+    offRouteCount = 0;
+    speak("ルートを再検索します");
+    fetchRoute([lat, lng], navDestPos, true).catch(() => {});
+  }
+}
+
+// ---------- 衝撃検知（急ブレーキ・事故で自動イベント保存）----------
+async function startImpactSensor() {
+  // iPhoneは「動きセンサーを使っていい？」の許可が必要
+  if (typeof DeviceMotionEvent !== "undefined" &&
+      typeof DeviceMotionEvent.requestPermission === "function") {
+    try {
+      const res = await DeviceMotionEvent.requestPermission();
+      if (res !== "granted") return;
+    } catch { return; }
+  }
+  window.addEventListener("devicemotion", onMotion);
+}
+
+function onMotion(e) {
+  if (!recording || !chkImpact.checked) return;
+  const a = e.acceleration; // 重力を除いた加速度
+  if (!a || a.x === null) return;
+  const g = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+  // 15 m/s² 以上の強い揺れ＝急ブレーキ・衝突とみなす（連発防止に10秒あける）
+  if (g > 15 && Date.now() - lastImpact > 10000) {
+    lastImpact = Date.now();
+    triggerEvent("衝撃を検知！");
+  }
+}
+
+// ---------- イベント保存（手動ボタン＆衝撃検知の共通処理）----------
+btnEvent.onclick = () => triggerEvent("イベント保存しました");
+
+async function triggerEvent(msg) {
+  // 今録画中のぶんを保護対象にする
+  protectThis = true;
+  // 直前に保存されたぶんも保護する（衝撃の少し前も残るように）
+  const list = await dbList();
+  if (list.length > 0) {
+    const latest = list.sort((a, b) => b.time.localeCompare(a.time))[0];
+    await dbSetProtected(latest.id, true);
+    renderList();
+  }
+  // 画面を金色に光らせて知らせる
+  videoWrap.classList.add("impact");
+  statusEl.textContent = "🔒 " + msg + "（この前後の録画は自動削除されません）";
+  setTimeout(() => videoWrap.classList.remove("impact"), 2000);
+}
+
+// ---------- 画面を消さないようにする（Wake Lock）----------
+async function keepScreenOn() {
+  try {
+    if ("wakeLock" in navigator) {
+      wakeLock = await navigator.wakeLock.request("screen");
+    }
+  } catch { /* 非対応でも続行 */ }
+}
+// アプリに戻ってきたときロックを取り直す
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && recording) keepScreenOn();
+});
+
+// ---------- 録画一覧の表示 ----------
+const clipList = document.getElementById("clipList");
+const emptyEl = document.getElementById("empty");
+
+async function renderList() {
+  const list = await dbList();
+  list.sort((a, b) => b.time.localeCompare(a.time)); // 新しい順
+  emptyEl.style.display = list.length ? "none" : "block";
+  clipList.innerHTML = "";
+  for (const seg of list) {
+    const d = new Date(seg.time);
+    const pad = n => String(n).padStart(2, "0");
+    const label = `${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    const mb = (seg.size / 1024 / 1024).toFixed(1);
+
+    const row = document.createElement("div");
+    row.className = "clip";
+    row.innerHTML = `
+      <div class="info">${seg.protected ? '<span class="lock">🔒</span> ' : ""}${label}<br>
+        <span style="color:#6e7681">${mb} MB</span></div>
+      <button class="b-play">▶</button>
+      <button class="b-save">💾</button>
+      <button class="b-lock">${seg.protected ? "🔓" : "🔒"}</button>
+      <button class="b-del">🗑</button>`;
+    row.querySelector(".b-play").onclick = () => playClip(seg.id);
+    row.querySelector(".b-save").onclick = () => downloadClip(seg.id);
+    row.querySelector(".b-lock").onclick = async () => {
+      await dbSetProtected(seg.id, !seg.protected); renderList();
+    };
+    row.querySelector(".b-del").onclick = async () => {
+      if (confirm("この録画を削除しますか？")) { await dbDelete(seg.id); renderList(); }
+    };
+    clipList.appendChild(row);
+  }
+}
+
+// ---------- 再生 ----------
+const playerModal = document.getElementById("playerModal");
+const playerVideo = document.getElementById("playerVideo");
+let playerURL = null;
+
+async function playClip(id) {
+  const seg = await dbGet(id);
+  if (!seg) return;
+  playerURL = URL.createObjectURL(seg.blob);
+  playerVideo.src = playerURL;
+  playerModal.classList.add("show");
+  playerVideo.play().catch(()=>{});
+}
+document.getElementById("playerClose").onclick = () => {
+  playerVideo.pause();
+  playerModal.classList.remove("show");
+  if (playerURL) { URL.revokeObjectURL(playerURL); playerURL = null; }
+};
+
+// ---------- ダウンロード（スマホ本体に保存）----------
+async function downloadClip(id) {
+  const seg = await dbGet(id);
+  if (!seg) return;
+  const d = new Date(seg.time);
+  const pad = n => String(n).padStart(2, "0");
+  const ext = seg.type.includes("mp4") ? "mp4" : "webm";
+  const name = `dorareko_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.${ext}`;
+  const url = URL.createObjectURL(seg.blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 3000);
+}
+
+// ---------- 起動時の準備 ----------
+(async () => {
+  await openDB();
+  renderList();
+  // サービスワーカー登録（ホーム画面アプリ化・オフライン対応）
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("sw-dorareko.js").catch(()=>{});
+  }
+})();
+</script>
+</body>
+</html>
