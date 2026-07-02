@@ -1,6 +1,6 @@
 // スマホドラレコ サービスワーカー（オフラインで動かすための仕組み）
 // 役割：一度開いたファイルを"端末内"に保存し、次からネットなしでも開けるようにする
-const CACHE = "dorareko-v2";
+const CACHE = "dorareko-v3";
 const ASSETS = [
   "./",
   "index.html",
@@ -25,9 +25,17 @@ self.addEventListener("activate", e => {
   self.clients.claim();
 });
 
-// 開くとき：まず端末内のキャッシュから（無ければネット）→ オフラインでも動く
+// 開くとき：まずネットから最新版を取り、取れたらキャッシュも更新
+// （圏外のときだけキャッシュを使う）→ 更新がすぐ届き、オフラインでも動く
 self.addEventListener("fetch", e => {
+  if (e.request.method !== "GET") return;
+  // 地図タイルや外部サービスはブラウザに任せる（キャッシュが膨らむのを防ぐ）
+  if (new URL(e.request.url).origin !== location.origin) return;
   e.respondWith(
-    caches.match(e.request).then(r => r || fetch(e.request))
+    fetch(e.request).then(res => {
+      const copy = res.clone();
+      caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+      return res;
+    }).catch(() => caches.match(e.request))
   );
 });

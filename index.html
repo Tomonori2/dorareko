@@ -179,6 +179,19 @@
   }
   #navBox button { background: #238636; padding: 10px 14px; white-space: nowrap; font-size: 14px; }
   #navBox button.navOn { background: #da3633; }
+  /* 目的地の候補一覧（タップで選ぶ） */
+  #navResults { max-height: 140px; overflow-y: auto; padding: 0 8px; display: flex; flex-direction: column; gap: 6px; }
+  #navResults button {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    text-align: left;
+    font-size: 13px;
+    padding: 10px;
+    border-radius: 8px;
+    color: #e6edf3;
+    line-height: 1.4;
+  }
+  #navResults button:active { background: #1f6feb; }
   #mapArea { position: relative; flex: 1; }
   #map { width: 100%; height: 100%; }
   /* 次の曲がり角の案内バナー */
@@ -246,6 +259,7 @@
     <input type="text" id="navDest" placeholder="目的地（例：名古屋駅）">
     <button id="btnNav">🧭 案内</button>
   </div>
+  <div id="navResults"></div>
   <div id="mapArea">
     <div id="map"></div>
     <div id="mapSpeed">-- km/h</div>
@@ -725,28 +739,88 @@ function speak(text) {
   } catch { /* 非対応でも画面の案内だけで続行 */ }
 }
 
-// 「🧭 案内」ボタン：目的地を検索してナビ開始（ナビ中なら終了）
+// 「🧭 案内」ボタン：目的地を検索して候補一覧を出す（ナビ中なら終了）
+const navResults = document.getElementById("navResults");
+
 btnNav.onclick = async () => {
   if (navActive) { stopNav(); return; }
   const q = navDest.value.trim();
   if (!q) { alert("目的地を入力してください（地図をタップでも指定できます）"); return; }
   if (!lastPos) { alert("GPSの現在地がまだ取れていません。少し待ってからもう一度押してください"); return; }
   btnNav.disabled = true; btnNav.textContent = "検索中…";
+  navResults.innerHTML = "";
   try {
-    // 無料の地名検索（日本国内・一番近い候補を使う）
-    const res = await fetch("https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=ja&countrycodes=jp&q=" + encodeURIComponent(q));
-    const hits = await res.json();
-    if (!hits.length) { alert("「" + q + "」が見つかりませんでした。住所や有名な施設名で試してください"); return; }
-    const name = hits[0].display_name.split(",").slice(0, 3).join("、");
-    if (!confirm("ここへ案内しますか？\n" + name)) return;
-    await beginNav(parseFloat(hits[0].lat), parseFloat(hits[0].lon));
+    const list = await searchPlace(q);
+    if (!list.length) {
+      alert("「" + q + "」が見つかりませんでした。\n・住所は「市」から書くと見つかりやすいです\n・施設は「イオン 知多」のように地名を足してみてください\n・地図を直接タップしても目的地にできます");
+      return;
+    }
+    showCandidates(list);
   } catch (e) {
-    alert("ルート検索に失敗しました。電波の良い場所でもう一度試してください");
+    alert("検索に失敗しました。電波の良い場所でもう一度試してください");
   } finally {
     btnNav.disabled = false;
     if (!navActive) btnNav.textContent = "🧭 案内";
   }
 };
+
+// 目的地検索：2つの無料サービスを合わせて使う
+// 1. 国土地理院（日本の住所・地名に強い）
+// 2. Nominatim/OpenStreetMap（施設名の取りこぼしを補う）
+async function searchPlace(q) {
+  const out = [];
+  const seenName = new Set(), seenSpot = new Set();
+  const add = (name, lat, lng) => {
+    if (isNaN(lat)) return;
+    const spot = lat.toFixed(3) + "," + lng.toFixed(3); // ほぼ同じ場所の重複を除く
+    if (seenName.has(name) || seenSpot.has(spot)) return;
+    seenName.add(name); seenSpot.add(spot);
+    out.push({ name, lat, lng });
+  };
+  // 現在地の周り±50kmほどを優先して探すおまじない（viewbox）
+  const vb = `&viewbox=${lastPos[1] - 0.5},${lastPos[0] + 0.5},${lastPos[1] + 0.5},${lastPos[0] - 0.5}`;
+  const nomi = (query, nearbyOnly) =>
+    fetch("https://nominatim.openstreetmap.org/search?format=json&limit=8&accept-language=ja&countrycodes=jp" +
+      vb + (nearbyOnly ? "&bounded=1" : "") + "&q=" + encodeURIComponent(query))
+      .then(r => r.json()).catch(() => []);
+  // 全部同時に問い合わせて速くする（どれかが失敗しても続行）
+  const jobs = [
+    fetch("https://msearch.gsi.go.jp/address-search/AddressSearch?q=" + encodeURIComponent(q))
+      .then(r => r.json()).catch(() => []),  // 国土地理院（住所に強い）
+    nomi(q, false),  // 全国から（近くを優先）
+    nomi(q, true)    // 現在地の周りだけ（近所の店・バス停など）
+  ];
+  // 地図上は「朝倉」のように「駅」なしで登録されている駅が多いので、外した名前でも近くを探す
+  if (q.endsWith("駅") && q.length > 1) jobs.push(nomi(q.slice(0, -1), true));
+  const [gsi, ...osmLists] = await Promise.all(jobs);
+  for (const f of (gsi || []).slice(0, 6)) {
+    add(f.properties.title, f.geometry.coordinates[1], f.geometry.coordinates[0]);
+  }
+  for (const list of osmLists) {
+    for (const h of (list || [])) {
+      add(h.display_name.split(",").slice(0, 3).join("　"), parseFloat(h.lat), parseFloat(h.lon));
+    }
+  }
+  // 今いる場所から近い順に並べる（「イオン」だけでも近所の店が上に来る）
+  for (const c of out) c.dist = haversine(lastPos[0], lastPos[1], c.lat, c.lng);
+  out.sort((a, b) => a.dist - b.dist);
+  return out.slice(0, 8);
+}
+
+// 候補一覧を表示 → タップでナビ開始
+function showCandidates(list) {
+  navResults.innerHTML = "";
+  for (const c of list) {
+    const b = document.createElement("button");
+    b.textContent = `📍 ${c.name}（${fmtDist(c.dist)}）`;
+    b.onclick = () => {
+      navResults.innerHTML = "";
+      beginNav(c.lat, c.lng).catch(() =>
+        alert("ルート検索に失敗しました。もう一度試してください"));
+    };
+    navResults.appendChild(b);
+  }
+}
 
 // ナビ開始：ルートを取ってきて線を引き、案内を始める
 async function beginNav(lat, lng) {
@@ -785,6 +859,7 @@ async function fetchRoute(from, to, isReroute) {
 function stopNav() {
   navActive = false;
   navSteps = []; routeCoords = [];
+  navResults.innerHTML = "";
   if (routeLine) { routeLine.remove(); routeLine = null; }
   if (destMarker) { destMarker.remove(); destMarker = null; }
   navBanner.style.display = "none";
