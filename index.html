@@ -756,10 +756,13 @@ function initMap() {
     radius: 10, color: "#ffffff", weight: 3, fillColor: "#1f6feb", fillOpacity: 1
   }).addTo(map);
   // 地図をタップした場所を目的地にできる
-  map.on("click", (e) => {
+  map.on("click", async (e) => {
     if (navActive) return;
     if (!lastPos) { alert("GPSの現在地がまだ取れていません。少し待ってください"); return; }
-    if (confirm("タップした場所を目的地にして案内を開始しますか？")) {
+    // タップした場所の住所を調べて確認画面に出す（指がズレていても気づけるように）
+    const name = await reverseName(e.latlng.lat, e.latlng.lng);
+    const label = name ? "「" + name + "」付近" : "タップした場所";
+    if (confirm(label + "を目的地にして案内を開始しますか？")) {
       beginNav(e.latlng.lat, e.latlng.lng).catch(() =>
         alert("ルート検索に失敗しました。もう一度試してください"));
     }
@@ -843,6 +846,12 @@ function haversine(lat1, lng1, lat2, lng2) {
 }
 // 距離を読みやすく（1.2km / 300m）
 const fmtDist = m => m >= 1000 ? (m / 1000).toFixed(1) + "km" : Math.max(10, Math.round(m / 10) * 10) + "m";
+// 秒数を読みやすく（約7分 / 約1時間5分）※fmtTimeは音楽プレーヤーで使用済みの名前なので別名に
+function fmtMin(sec) {
+  const m = Math.max(1, Math.round(sec / 60));
+  if (m < 60) return m + "分";
+  return Math.floor(m / 60) + "時間" + (m % 60 ? (m % 60) + "分" : "");
+}
 
 // 曲がる方向を日本語にする
 function jpTurn(step) {
@@ -958,6 +967,18 @@ async function searchByName(q) {
   return out;
 }
 
+// 座標から住所を逆引き（Nominatim・無料）。地図タップ時の確認画面用。
+// 失敗してもナビは続けられるので、取れなければ null を返すだけ
+async function reverseName(lat, lng) {
+  try {
+    const data = await fetch("https://nominatim.openstreetmap.org/reverse?format=json&accept-language=ja&zoom=17" +
+      "&lat=" + lat + "&lon=" + lng).then(r => r.json());
+    if (!data || !data.display_name) return null;
+    // 「八幡, 知多市, 愛知県, …」のように細かい順で来るので、最初の3つだけ使う
+    return data.display_name.split(",").slice(0, 3).map(s => s.trim()).join("　");
+  } catch { return null; }
+}
+
 // 目的地検索：無料サービスを合わせて使う
 // 1. 国土地理院（日本の住所・地名に強い）
 // 2. Nominatim/OpenStreetMap（施設名の取りこぼしを補う）
@@ -1036,7 +1057,7 @@ async function beginNav(lat, lng) {
   camMapCompass.style.display = "flex";
   if (!miniMap) initMiniMap();
   setTimeout(() => miniMap.invalidateSize(), 100);
-  await fetchRoute(lastPos, navDestPos, false);
+  const route = await fetchRoute(lastPos, navDestPos, false);
   navActive = true;
   btnNav.textContent = "■ 案内終了";
   btnNav.classList.add("navOn");
@@ -1044,7 +1065,7 @@ async function beginNav(lat, lng) {
   camNavBanner.style.display = "block";
   if (destMarker) destMarker.remove();
   destMarker = L.marker([lat, lng]).addTo(map);
-  speak("案内を開始します");
+  speak("案内を開始します。目的地までおよそ" + fmtMin(route.duration) + "です");
 }
 
 // 無料ルート検索（OSRM）から道順を取得
@@ -1094,10 +1115,18 @@ function onNavPosition(lat, lng) {
   const [slng, slat] = step.maneuver.location; // OSRMは[経度,緯度]の順
   const d = haversine(lat, lng, slat, slng);
 
-  // 画面の案内バナー：「↰ 300m先 左方向　残り2.1km」
-  let remain = d;
-  for (let i = nextStepIdx; i < navSteps.length; i++) remain += navSteps[i].distance;
-  const bannerText = `${jpArrow(step)} ${fmtDist(d)}先 ${jpTurn(step)}　残り${fmtDist(remain)}`;
+  // 画面の案内バナー：「↰ 300m先 左方向　残り2.1km・約7分（18:45着）」
+  let remain = d, remainSec = 0;
+  for (let i = nextStepIdx; i < navSteps.length; i++) {
+    remain += navSteps[i].distance;
+    remainSec += navSteps[i].duration;
+  }
+  // 今走っている区間の残り時間も足す（その区間の平均ペースで換算）
+  const prevStep = navSteps[nextStepIdx - 1];
+  if (prevStep && prevStep.distance > 0) remainSec += d / prevStep.distance * prevStep.duration;
+  const eta = new Date(Date.now() + remainSec * 1000);
+  const etaStr = eta.getHours() + ":" + String(eta.getMinutes()).padStart(2, "0");
+  const bannerText = `${jpArrow(step)} ${fmtDist(d)}先 ${jpTurn(step)}　残り${fmtDist(remain)}・約${fmtMin(remainSec)}（${etaStr}着）`;
   navBanner.textContent = bannerText;
   camNavBanner.textContent = bannerText;
 
