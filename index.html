@@ -62,6 +62,21 @@
   }
   @keyframes blink { 50% { opacity: 0.5; } }
 
+  /* カメラ画面に重ねる、次の曲がり角の案内（ナビ中だけ表示） */
+  #camNavBanner {
+    display: none;
+    position: absolute;
+    left: 8px; top: 8px; right: 8px;
+    z-index: 5;
+    background: rgba(31,111,235,0.9);
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: bold;
+    line-height: 1.4;
+  }
+
   /* ===== ボタン ===== */
   button {
     font-family: inherit;
@@ -209,6 +224,14 @@
     font-weight: bold;
     line-height: 1.5;
   }
+  /* 地図の拡大・縮小ボタン（タップしやすく大きめに）*/
+  .leaflet-control-zoom-in, .leaflet-control-zoom-out {
+    width: 40px !important;
+    height: 40px !important;
+    line-height: 40px !important;
+    font-size: 20px !important;
+  }
+
   /* 地図の上に速度を大きく表示 */
   #mapSpeed {
     position: absolute;
@@ -221,6 +244,31 @@
     font-size: 20px;
     font-weight: bold;
   }
+
+  /* ===== 高坂ソング（BGM再生）===== */
+  #musicWrap {
+    display: none;
+    flex-direction: column;
+    margin: 0 12px 12px;
+    padding: 14px;
+    border-radius: 12px;
+    border: 3px solid #30363d;
+    background: #161b22;
+  }
+  .musicNow { text-align: center; font-size: 15px; font-weight: bold; margin-bottom: 10px; }
+  .bar { background: #21262d; border-radius: 10px; height: 6px; cursor: pointer; }
+  .bar #musicFill { background: linear-gradient(90deg,#1f6feb,#58a6ff); height: 6px; border-radius: 10px; width: 0%; }
+  .times { display: flex; justify-content: space-between; font-size: 11px; color: #8b949e; margin: 4px 0 10px; }
+  .musicCtrl { display: flex; align-items: center; justify-content: center; gap: 22px; margin-bottom: 12px; }
+  .musicCtrl button { background: none; font-size: 22px; padding: 6px; }
+  .musicCtrl #btnMusicPlay { font-size: 30px; }
+  #musicList { display: flex; flex-direction: column; gap: 6px; }
+  .musicSong {
+    display: flex; align-items: center; gap: 10px; padding: 10px;
+    background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+    font-size: 14px; cursor: pointer;
+  }
+  .musicSong.active { background: rgba(31,111,235,0.25); border-color: #1f6feb; }
 
   /* ステータス表示 */
   #status {
@@ -243,6 +291,7 @@
 <div class="videoWrap" id="videoWrap">
   <canvas id="preview" width="1280" height="720"></canvas>
   <div class="badge" id="recBadge">● REC</div>
+  <div id="camNavBanner"></div>
 </div>
 
 <div id="status">「録画スタート」を押すとカメラとGPSの許可を聞かれます</div>
@@ -266,6 +315,21 @@
     <div id="navBanner"></div>
   </div>
 </div>
+
+<!-- 高坂ソング（BGM再生） -->
+<button class="btn-map" id="btnMusic">🎵 高坂ソングを再生</button>
+<div id="musicWrap">
+  <div class="musicNow" id="musicNow">曲を選んでね</div>
+  <div class="bar" id="musicBar"><div id="musicFill"></div></div>
+  <div class="times"><span id="musicCur">0:00</span><span id="musicDur">0:00</span></div>
+  <div class="musicCtrl">
+    <button id="btnMusicPrev">⏮</button>
+    <button id="btnMusicPlay">▶️</button>
+    <button id="btnMusicNext">⏭</button>
+  </div>
+  <div id="musicList"></div>
+</div>
+<audio id="bgm"></audio>
 
 <!-- 録画一覧 -->
 <div class="panel">
@@ -433,10 +497,13 @@ async function startRecording() {
     statusEl.textContent = "カメラを準備中...";
 
     // 1. カメラ（後ろ向き）とマイクを起動
+    // 音声はecho cancellation等をオフに（Androidが「通話中」の音声モードにして
+    // 音楽を止めてしまうのを防ぐため。ドラレコは通話品質より普通の録音でよい）
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: true
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
     });
+    if (!bgm.paused) bgm.play().catch(() => {}); // 念のため音楽の再生を取り戻す
 
     // 2. 裏方のvideo要素で映像を受ける
     videoEl = document.createElement("video");
@@ -635,6 +702,7 @@ btnMap.onclick = () => {
 function initMap() {
   // 最初は日本全体。GPSが取れたら現在地に飛ぶ
   map = L.map("map", { zoomControl: false }).setView([36.0, 137.5], 5);
+  L.control.zoom({ position: "bottomright" }).addTo(map); // 拡大・縮小ボタン（右下）
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
     attribution: "&copy; OpenStreetMap contributors"
@@ -687,6 +755,7 @@ function updateMap(lat, lng) {
 const btnNav = document.getElementById("btnNav");
 const navDest = document.getElementById("navDest");
 const navBanner = document.getElementById("navBanner");
+const camNavBanner = document.getElementById("camNavBanner"); // カメラ画面に重ねる案内
 
 let navActive = false;   // ナビ中かどうか
 let navDestPos = null;   // 目的地 [緯度, 経度]
@@ -830,6 +899,7 @@ async function beginNav(lat, lng) {
   btnNav.textContent = "■ 案内終了";
   btnNav.classList.add("navOn");
   navBanner.style.display = "block";
+  camNavBanner.style.display = "block";
   if (destMarker) destMarker.remove();
   destMarker = L.marker([lat, lng]).addTo(map);
   speak("案内を開始します");
@@ -863,6 +933,7 @@ function stopNav() {
   if (routeLine) { routeLine.remove(); routeLine = null; }
   if (destMarker) { destMarker.remove(); destMarker = null; }
   navBanner.style.display = "none";
+  camNavBanner.style.display = "none";
   btnNav.textContent = "🧭 案内";
   btnNav.classList.remove("navOn");
   speechSynthesis.cancel();
@@ -878,7 +949,9 @@ function onNavPosition(lat, lng) {
   // 画面の案内バナー：「↰ 300m先 左方向　残り2.1km」
   let remain = d;
   for (let i = nextStepIdx; i < navSteps.length; i++) remain += navSteps[i].distance;
-  navBanner.textContent = `${jpArrow(step)} ${fmtDist(d)}先 ${jpTurn(step)}　残り${fmtDist(remain)}`;
+  const bannerText = `${jpArrow(step)} ${fmtDist(d)}先 ${jpTurn(step)}　残り${fmtDist(remain)}`;
+  navBanner.textContent = bannerText;
+  camNavBanner.textContent = bannerText;
 
   // 音声案内（300m手前と直前の2回）
   if (d < 300 && !announced.far) {
@@ -895,6 +968,7 @@ function onNavPosition(lat, lng) {
     if (step.maneuver.type === "arrive" || nextStepIdx >= navSteps.length - 1) {
       speak("目的地に到着しました。お疲れさまでした");
       navBanner.textContent = "🏁 目的地に到着しました";
+      camNavBanner.textContent = "🏁 目的地に到着しました";
       setTimeout(stopNav, 5000);
       return;
     }
@@ -1043,6 +1117,81 @@ async function downloadClip(id) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 3000);
 }
+
+/* =========================================================
+   高坂ソング（BGM再生）
+   ・曲データは高坂ソングアプリ（../kosaka-song/）のmp3をそのまま使う
+   ・録画中はスマホのマイクで音を拾うので、この曲もマイクに入り込みます
+   ========================================================= */
+const musicSongs = [
+  { title: "🌺 島の歌",          file: "島の歌.mp3" },
+  { title: "🔥 燃えろ！こうさか", file: "燃えろ！こうさか.mp3" },
+  { title: "✨ Celebrate Tonight", file: "Celebrate Tonight.mp3" },
+  { title: "🏙️ NAGOYA CITY",      file: "NAGOYA CITY.mp3" },
+  { title: "✈️ 低空飛行",          file: "低空飛行.mp3" }
+];
+const bgm = document.getElementById("bgm");
+const musicWrap = document.getElementById("musicWrap");
+const btnMusic = document.getElementById("btnMusic");
+const musicNow = document.getElementById("musicNow");
+const musicFill = document.getElementById("musicFill");
+const musicCur = document.getElementById("musicCur");
+const musicDur = document.getElementById("musicDur");
+const btnMusicPlay = document.getElementById("btnMusicPlay");
+const musicListEl = document.getElementById("musicList");
+let musicVisible = false;
+let currentSong = -1;
+
+musicSongs.forEach((s, i) => {
+  const div = document.createElement("div");
+  div.className = "musicSong";
+  div.id = "musicSong-" + i;
+  div.textContent = s.title;
+  div.onclick = () => playMusic(i);
+  musicListEl.appendChild(div);
+});
+
+btnMusic.onclick = () => {
+  musicVisible = !musicVisible;
+  musicWrap.style.display = musicVisible ? "flex" : "none";
+  btnMusic.classList.toggle("active", musicVisible);
+};
+
+function playMusic(i) {
+  currentSong = i;
+  bgm.src = "../kosaka-song/songs/" + encodeURIComponent(musicSongs[i].file);
+  bgm.play().catch(() => {});
+  musicNow.textContent = musicSongs[i].title;
+  musicSongs.forEach((_, j) => {
+    document.getElementById("musicSong-" + j).classList.toggle("active", j === i);
+  });
+}
+btnMusicPlay.onclick = () => {
+  if (currentSong === -1) { playMusic(0); return; }
+  if (bgm.paused) bgm.play(); else bgm.pause();
+};
+document.getElementById("btnMusicPrev").onclick = () =>
+  playMusic(currentSong > 0 ? currentSong - 1 : musicSongs.length - 1);
+document.getElementById("btnMusicNext").onclick = () =>
+  playMusic(currentSong < musicSongs.length - 1 ? currentSong + 1 : 0);
+bgm.onended = () => document.getElementById("btnMusicNext").onclick();
+bgm.onplay = () => { btnMusicPlay.textContent = "⏸"; };
+bgm.onpause = () => { btnMusicPlay.textContent = "▶️"; };
+
+function fmtTime(t) {
+  if (isNaN(t)) return "0:00";
+  const m = Math.floor(t / 60), s = Math.floor(t % 60);
+  return m + ":" + (s < 10 ? "0" : "") + s;
+}
+bgm.ontimeupdate = () => {
+  musicCur.textContent = fmtTime(bgm.currentTime);
+  musicDur.textContent = fmtTime(bgm.duration);
+  musicFill.style.width = (bgm.duration ? bgm.currentTime / bgm.duration * 100 : 0) + "%";
+};
+document.getElementById("musicBar").onclick = (e) => {
+  const box = e.currentTarget.getBoundingClientRect();
+  bgm.currentTime = (e.clientX - box.left) / box.width * bgm.duration;
+};
 
 // ---------- 起動時の準備 ----------
 (async () => {
