@@ -90,6 +90,26 @@
     box-shadow: 0 4px 14px rgba(0,0,0,0.5);
   }
 
+  /* 地図の方位マーク（常に北が上向きの固定表示）*/
+  #mapCompass, #camMapCompass {
+    position: absolute;
+    border-radius: 50%;
+    background: rgba(13,17,23,0.75);
+    border: 1px solid rgba(255,255,255,0.35);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: #fff; font-weight: bold; line-height: 1;
+  }
+  #mapCompass { left: 10px; bottom: 10px; width: 32px; height: 32px; font-size: 10px; z-index: 1000; }
+  #camMapCompass { display: none; right: 114px; bottom: 114px; width: 20px; height: 20px; font-size: 8px; z-index: 6; }
+  #mapCompass .arrow, #camMapCompass .arrow {
+    width: 0; height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 7px solid #f85149;
+    margin-bottom: 1px;
+  }
+  #camMapCompass .arrow { border-left-width: 3px; border-right-width: 3px; border-bottom-width: 5px; margin-bottom: 0; }
+
   /* ===== ボタン ===== */
   button {
     font-family: inherit;
@@ -306,6 +326,7 @@
   <div class="badge" id="recBadge">● REC</div>
   <div id="camNavBanner"></div>
   <div id="camMiniMap"></div>
+  <div id="camMapCompass"><div class="arrow"></div><span>N</span></div>
 </div>
 
 <div id="status">「録画スタート」を押すとカメラとGPSの許可を聞かれます</div>
@@ -327,6 +348,7 @@
     <div id="map"></div>
     <div id="mapSpeed">-- km/h</div>
     <div id="navBanner"></div>
+    <div id="mapCompass"><div class="arrow"></div><span>N</span></div>
   </div>
 </div>
 
@@ -767,6 +789,7 @@ function updateMap(lat, lng) {
 // ---------- カメラ画面に重ねる小さいナビ地図（ナビ中だけ）----------
 // 大きい地図とは別インスタンス。見るだけ（タップ操作・ズームボタンなし）で軽く保つ
 const camMiniMap = document.getElementById("camMiniMap");
+const camMapCompass = document.getElementById("camMapCompass");
 let miniMap = null, miniCarMarker = null, miniRouteLine = null;
 
 function initMiniMap() {
@@ -987,6 +1010,7 @@ function showCandidates(list) {
 async function beginNav(lat, lng) {
   navDestPos = [lat, lng];
   camMiniMap.style.display = "block";
+  camMapCompass.style.display = "flex";
   if (!miniMap) initMiniMap();
   setTimeout(() => miniMap.invalidateSize(), 100);
   await fetchRoute(lastPos, navDestPos, false);
@@ -1034,6 +1058,7 @@ function stopNav() {
   navBanner.style.display = "none";
   camNavBanner.style.display = "none";
   camMiniMap.style.display = "none";
+  camMapCompass.style.display = "none";
   btnNav.textContent = "🧭 案内";
   btnNav.classList.remove("navOn");
   speechSynthesis.cancel();
