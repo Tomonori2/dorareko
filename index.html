@@ -77,6 +77,19 @@
     line-height: 1.4;
   }
 
+  /* カメラ画面に重ねる、小さいナビ地図（ナビ中だけ表示。見るだけでタップ操作なし）*/
+  #camMiniMap {
+    display: none;
+    position: absolute;
+    right: 8px; bottom: 8px;
+    width: 130px; height: 130px;
+    z-index: 5;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 2px solid #58a6ff;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+  }
+
   /* ===== ボタン ===== */
   button {
     font-family: inherit;
@@ -292,6 +305,7 @@
   <canvas id="preview" width="1280" height="720"></canvas>
   <div class="badge" id="recBadge">● REC</div>
   <div id="camNavBanner"></div>
+  <div id="camMiniMap"></div>
 </div>
 
 <div id="status">「録画スタート」を押すとカメラとGPSの許可を聞かれます</div>
@@ -305,7 +319,7 @@
 <button class="btn-map" id="btnMap">🗺 地図を表示（今どこ？）</button>
 <div id="mapWrap">
   <div id="navBox">
-    <input type="text" id="navDest" placeholder="目的地（例：名古屋駅）">
+    <input type="text" id="navDest" placeholder="目的地（例：名古屋駅 / 0561-12-3456）">
     <button id="btnNav">🧭 案内</button>
   </div>
   <div id="navResults"></div>
@@ -357,7 +371,8 @@
     ・録画中は画面を消さないでください（消えると録画が止まります）<br>
     ・電池を多く使うので、充電しながらの使用がおすすめです<br>
     ・地図・ナビにはネット接続（モバイル通信）が必要です<br>
-    ・ナビは簡易版です（渋滞情報なし）。音声はスマホの音量をONに
+    ・ナビは簡易版です（渋滞情報なし）。音声はスマホの音量をONに<br>
+    ・電話番号でも検索できます（OpenStreetMapに登録がある店舗のみ）
   </div>
 </div>
 
@@ -732,6 +747,7 @@ function handlePosition(lat, lng) {
   lastPos = [lat, lng];
   onNavPosition(lat, lng); // ナビ中なら案内を更新（地図を隠していても動く）
   updateMap(lat, lng);     // 地図の見た目を更新
+  updateMiniMap(lat, lng); // カメラ画面の小さい地図も更新
 }
 
 function updateMap(lat, lng) {
@@ -741,6 +757,29 @@ function updateMap(lat, lng) {
   map.setView([lat, lng], mapFirstFix ? 16 : map.getZoom());
   mapFirstFix = false;
   mapSpeedEl.textContent = (speedKmh === null ? "--" : speedKmh) + " km/h";
+}
+
+// ---------- カメラ画面に重ねる小さいナビ地図（ナビ中だけ）----------
+// 大きい地図とは別インスタンス。見るだけ（タップ操作・ズームボタンなし）で軽く保つ
+const camMiniMap = document.getElementById("camMiniMap");
+let miniMap = null, miniCarMarker = null, miniRouteLine = null;
+
+function initMiniMap() {
+  miniMap = L.map("camMiniMap", {
+    zoomControl: false, attributionControl: false,
+    dragging: false, scrollWheelZoom: false, doubleClickZoom: false,
+    touchZoom: false, boxZoom: false, keyboard: false
+  }).setView([36.0, 137.5], 16);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19 }).addTo(miniMap);
+  miniCarMarker = L.circleMarker([36.0, 137.5], {
+    radius: 8, color: "#ffffff", weight: 2, fillColor: "#1f6feb", fillOpacity: 1
+  }).addTo(miniMap);
+}
+
+function updateMiniMap(lat, lng) {
+  if (!miniMap) return;
+  miniCarMarker.setLatLng([lat, lng]);
+  miniMap.setView([lat, lng], 16);
 }
 
 /* =========================================================
@@ -821,7 +860,10 @@ btnNav.onclick = async () => {
   try {
     const list = await searchPlace(q);
     if (!list.length) {
-      alert("「" + q + "」が見つかりませんでした。\n・住所は「市」から書くと見つかりやすいです\n・施設は「イオン 知多」のように地名を足してみてください\n・地図を直接タップしても目的地にできます");
+      const msg = isPhoneQuery(q)
+        ? "「" + q + "」に該当する場所が見つかりませんでした。\n・電話番号検索はOpenStreetMapに登録されている店舗のみ対象です（登録がないと見つかりません）\n・お店の名前や住所でも検索してみてください"
+        : "「" + q + "」が見つかりませんでした。\n・住所は「市」から書くと見つかりやすいです\n・施設は「イオン 知多」のように地名を足してみてください\n・地図を直接タップしても目的地にできます";
+      alert(msg);
       return;
     }
     showCandidates(list);
@@ -833,10 +875,55 @@ btnNav.onclick = async () => {
   }
 };
 
-// 目的地検索：2つの無料サービスを合わせて使う
+// 電話番号っぽい入力かどうか（数字が9桁以上で、記号は - と空白と ( ) だけ）
+function isPhoneQuery(q) {
+  const t = q.trim();
+  const digits = t.replace(/[^0-9]/g, "");
+  return digits.length >= 9 && /^[0-9\-\s()]+$/.test(t);
+}
+
+// 電話番号で場所を探す：OpenStreetMap（Overpass API・無料）に登録された
+// 電話番号タグを検索する。お店・施設が登録済みの場合のみ見つかる
+async function searchByPhone(q) {
+  const digits = q.replace(/[^0-9]/g, "");
+  // OSM上は「+81 3-1234-5678」のような国際表記で登録されていることが多く、
+  // 「03-1234-5678」という国内表記のまま検索すると一致しないため、
+  // 先頭の0を国番号(81)に置き換えたパターンも同時に許可する
+  let rest = digits, prefix = "";
+  if (digits.startsWith("0")) {
+    rest = digits.slice(1);
+    prefix = "(0|81|0081)[^0-9]{0,3}";
+  }
+  // 数字の間にハイフンや空白が入っていても拾えるよう、数字の間に「区切り文字」を許す正規表現にする
+  const pattern = prefix + rest.split("").join("[^0-9]{0,2}");
+  const query = `[out:json][timeout:20];(nwr["phone"~"${pattern}"](24,122,46,146);nwr["contact:phone"~"${pattern}"](24,122,46,146););out center 20;`;
+  const res = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    body: "data=" + encodeURIComponent(query)
+  });
+  const data = await res.json();
+  const out = [];
+  for (const el of (data.elements || [])) {
+    const tags = el.tags || {};
+    const lat = el.lat ?? (el.center && el.center.lat);
+    const lng = el.lon ?? (el.center && el.center.lon);
+    if (lat == null || lng == null) continue;
+    out.push({ name: tags.name || ("📞 " + q), lat, lng });
+  }
+  return out;
+}
+
+// 目的地検索：無料サービスを合わせて使う
 // 1. 国土地理院（日本の住所・地名に強い）
 // 2. Nominatim/OpenStreetMap（施設名の取りこぼしを補う）
+// 3. 電話番号らしい入力のときはOverpass APIで電話番号タグを検索
 async function searchPlace(q) {
+  if (isPhoneQuery(q)) {
+    const list = await searchByPhone(q);
+    for (const c of list) c.dist = haversine(lastPos[0], lastPos[1], c.lat, c.lng);
+    list.sort((a, b) => a.dist - b.dist);
+    return list.slice(0, 8);
+  }
   const out = [];
   const seenName = new Set(), seenSpot = new Set();
   const add = (name, lat, lng) => {
@@ -894,6 +981,9 @@ function showCandidates(list) {
 // ナビ開始：ルートを取ってきて線を引き、案内を始める
 async function beginNav(lat, lng) {
   navDestPos = [lat, lng];
+  camMiniMap.style.display = "block";
+  if (!miniMap) initMiniMap();
+  setTimeout(() => miniMap.invalidateSize(), 100);
   await fetchRoute(lastPos, navDestPos, false);
   navActive = true;
   btnNav.textContent = "■ 案内終了";
@@ -921,6 +1011,10 @@ async function fetchRoute(from, to, isReroute) {
   offRouteCount = 0;
   if (routeLine) routeLine.remove();
   routeLine = L.geoJSON(route.geometry, { style: { color: "#d29922", weight: 6, opacity: 0.85 } }).addTo(map);
+  if (miniMap) {
+    if (miniRouteLine) miniMap.removeLayer(miniRouteLine);
+    miniRouteLine = L.geoJSON(route.geometry, { style: { color: "#d29922", weight: 5, opacity: 0.85 } }).addTo(miniMap);
+  }
   if (!isReroute && map) map.fitBounds(routeLine.getBounds(), { padding: [30, 30] });
   return route;
 }
@@ -934,6 +1028,7 @@ function stopNav() {
   if (destMarker) { destMarker.remove(); destMarker = null; }
   navBanner.style.display = "none";
   camNavBanner.style.display = "none";
+  camMiniMap.style.display = "none";
   btnNav.textContent = "🧭 案内";
   btnNav.classList.remove("navOn");
   speechSynthesis.cancel();
