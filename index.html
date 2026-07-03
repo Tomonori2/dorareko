@@ -941,10 +941,28 @@ async function searchByPhone(q) {
   return out;
 }
 
+// 名前・ブランド名でも広く探す：Photon（無料・OSMベースの高速検索）で補う。
+// Nominatimの検索アルゴリズムで漏れてしまう表記も、ここで拾えることがある
+async function searchByName(q) {
+  if (!lastPos) return [];
+  const data = await fetch("https://photon.komoot.io/api/?limit=8&lat=" + lastPos[0] + "&lon=" + lastPos[1] +
+    "&q=" + encodeURIComponent(q)).then(r => r.json()).catch(() => null);
+  if (!data) return [];
+  const out = [];
+  for (const f of (data.features || [])) {
+    const name = f.properties && f.properties.name;
+    const coords = f.geometry && f.geometry.coordinates;
+    if (!name || !coords) continue;
+    out.push({ name, lat: coords[1], lng: coords[0] });
+  }
+  return out;
+}
+
 // 目的地検索：無料サービスを合わせて使う
 // 1. 国土地理院（日本の住所・地名に強い）
 // 2. Nominatim/OpenStreetMap（施設名の取りこぼしを補う）
-// 3. 電話番号らしい入力のときはOverpass APIで電話番号タグを検索
+// 3. Photon（OSMベースの高速検索。Nominatimの取りこぼしを補う）
+// 4. 電話番号らしい入力のときはOverpass APIで電話番号タグを検索
 async function searchPlace(q) {
   if (isPhoneQuery(q)) {
     const list = await searchByPhone(q);
@@ -976,7 +994,11 @@ async function searchPlace(q) {
   ];
   // 地図上は「朝倉」のように「駅」なしで登録されている駅が多いので、外した名前でも近くを探す
   if (q.endsWith("駅") && q.length > 1) jobs.push(nomi(q.slice(0, -1), true));
-  const [gsi, ...osmLists] = await Promise.all(jobs);
+  const [jobResults, nameHits] = await Promise.all([
+    Promise.all(jobs),
+    searchByName(q).catch(() => [])
+  ]);
+  const [gsi, ...osmLists] = jobResults;
   for (const f of (gsi || []).slice(0, 6)) {
     add(f.properties.title, f.geometry.coordinates[1], f.geometry.coordinates[0]);
   }
@@ -985,6 +1007,7 @@ async function searchPlace(q) {
       add(h.display_name.split(",").slice(0, 3).join("　"), parseFloat(h.lat), parseFloat(h.lon));
     }
   }
+  for (const el of nameHits) add(el.name, el.lat, el.lng);
   // 今いる場所から近い順に並べる（「イオン」だけでも近所の店が上に来る）
   for (const c of out) c.dist = haversine(lastPos[0], lastPos[1], c.lat, c.lng);
   out.sort((a, b) => a.dist - b.dist);
