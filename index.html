@@ -514,9 +514,14 @@ async function startRecording() {
     // 1. カメラ（後ろ向き）とマイクを起動
     // 音声はecho cancellation等をオフに（Androidが「通話中」の音声モードにして
     // 音楽を止めてしまうのを防ぐため。ドラレコは通話品質より普通の録音でよい）
+    // 標準の制約だけでは効かない端末があるため、Chrome独自(goog〜)の制約も一緒に指定する
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      audio: {
+        echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+        googEchoCancellation: false, googAutoGainControl: false, googNoiseSuppression: false,
+        googHighpassFilter: false, googTypingNoiseDetection: false, googAudioMirroring: false
+      }
     });
     if (!bgm.paused) bgm.play().catch(() => {}); // 念のため音楽の再生を取り戻す
 
