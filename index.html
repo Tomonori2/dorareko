@@ -428,10 +428,8 @@ let stream = null;        // カメラ＋マイクの生データ
 let videoEl = null;       // カメラ映像を受ける裏方のvideo要素
 let recorder = null;      // 録画係（MediaRecorder）
 let recording = false;    // 録画中かどうか
-let chunks = [];          // 録画データのかけら置き場
+let currentSeg = null;    // 今録画中のぶんの情報（データ・開始時刻・保護フラグ）
 let segmentTimer = null;  // 1分ごとに区切るタイマー
-let segmentStart = null;  // 今のセグメントの開始時刻
-let protectThis = false;  // 今録画中のぶんを保護するか（イベント保存）
 let mimeType = "";        // 録画形式（スマホによって mp4 / webm）
 let wakeLock = null;      // 画面を消さないためのロック
 let gpsWatch = null;      // GPS監視の番号
@@ -621,12 +619,14 @@ function stopRecording() {
 
 // ---------- 1分ごとのセグメント録画 ----------
 function startSegment(mixed) {
-  chunks = [];
-  segmentStart = new Date();
-  protectThis = false;
+  // セグメントごとに専用の入れ物（seg）を持たせる。全体で1つの変数を共有すると、
+  // 前のぶんの保存が終わる前に次のセグメントが値を書き換えてしまい、
+  // 「イベント保存が消える」「時刻が1分ズレる」の原因になる
+  const seg = { chunks: [], start: new Date(), protect: false };
+  currentSeg = seg;
   recorder = new MediaRecorder(mixed, mimeType ? { mimeType } : undefined);
-  recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-  recorder.onstop = saveSegment;
+  recorder.ondataavailable = (e) => { if (e.data.size > 0) seg.chunks.push(e.data); };
+  recorder.onstop = () => saveSegment(seg);
   recorder.start();
 }
 
@@ -637,17 +637,22 @@ function rotateSegment(mixed) {
 }
 
 // 録画1本ぶんを端末内に保存して、古いものを掃除
-async function saveSegment() {
-  if (chunks.length === 0) return;
-  const blob = new Blob(chunks, { type: mimeType || "video/webm" });
-  chunks = [];
-  await dbAdd({
-    time: segmentStart.toISOString(),
-    blob: blob,
-    size: blob.size,
-    type: blob.type,
-    protected: protectThis
-  });
+async function saveSegment(seg) {
+  if (seg.chunks.length === 0) return;
+  const blob = new Blob(seg.chunks, { type: mimeType || "video/webm" });
+  try {
+    await dbAdd({
+      time: seg.start.toISOString(),
+      blob: blob,
+      size: blob.size,
+      type: blob.type,
+      protected: seg.protect
+    });
+  } catch (err) {
+    // 空き容量不足などで保存できなかったら、黙って消えるのではなく画面で知らせる
+    statusEl.textContent = "⚠ 録画の保存に失敗しました。スマホの空き容量を確認してください";
+    return;
+  }
   await cleanupOld();
   renderList();
 }
@@ -889,7 +894,7 @@ const navResults = document.getElementById("navResults");
 
 btnNav.onclick = async () => {
   if (navActive) { stopNav(); return; }
-  const q = navDest.value.trim();
+  const q = normalizeQuery(navDest.value); // 全角→半角などの表記ゆれを直してから探す
   if (!q) { alert("目的地を入力してください（地図をタップでも指定できます）"); return; }
   if (!lastPos) { alert("GPSの現在地がまだ取れていません。少し待ってからもう一度押してください"); return; }
   btnNav.disabled = true; btnNav.textContent = "検索中…";
@@ -911,6 +916,21 @@ btnNav.onclick = async () => {
     if (!navActive) btnNav.textContent = "🧭 案内";
   }
 };
+
+// 入力の表記ゆれを直す（全角英数→半角、全角スペース→半角、前後の空白を除く）
+// 例：「ＡＥＯＮ　知多」→「AEON 知多」。電話番号の全角数字も半角になる
+function normalizeQuery(q) {
+  return q.normalize("NFKC").replace(/\s+/g, " ").trim();
+}
+
+// 検索する「言い方」のバリエーションを作ってヒット率を上げる
+// 例：「イオン 知多」→「イオン知多」も試す、「スギ薬局知多店」→「スギ薬局知多」も試す
+function queryVariants(q) {
+  const list = [q];
+  if (q.includes(" ")) list.push(q.replace(/ /g, ""));      // スペースなし版
+  if (q.endsWith("店") && q.length > 2) list.push(q.slice(0, -1)); // 「店」を外した版
+  return [...new Set(list)]; // 同じものは除く
+}
 
 // 電話番号っぽい入力かどうか（数字が9桁以上で、記号は - と空白と ( ) だけ）
 function isPhoneQuery(q) {
@@ -959,10 +979,16 @@ async function searchByName(q) {
   if (!data) return [];
   const out = [];
   for (const f of (data.features || [])) {
-    const name = f.properties && f.properties.name;
+    const p = f.properties || {};
+    const name = p.name;
     const coords = f.geometry && f.geometry.coordinates;
     if (!name || !coords) continue;
-    out.push({ name, lat: coords[1], lng: coords[0] });
+    // 市町村名も付けて、同じ名前のお店（チェーン店など）を見分けやすくする
+    const area = p.city || p.town || p.village || p.state || "";
+    out.push({
+      name: area && !name.includes(area) ? name + "　" + area : name,
+      lat: coords[1], lng: coords[0]
+    });
   }
   return out;
 }
@@ -984,7 +1010,8 @@ async function reverseName(lat, lng) {
 // 2. Nominatim/OpenStreetMap（施設名の取りこぼしを補う）
 // 3. Photon（OSMベースの高速検索。Nominatimの取りこぼしを補う）
 // 4. 電話番号らしい入力のときはOverpass APIで電話番号タグを検索
-async function searchPlace(q) {
+async function searchPlace(raw) {
+  const q = normalizeQuery(raw);
   if (isPhoneQuery(q)) {
     const list = await searchByPhone(q);
     for (const c of list) c.dist = haversine(lastPos[0], lastPos[1], c.lat, c.lng);
@@ -1006,29 +1033,37 @@ async function searchPlace(q) {
     fetch("https://nominatim.openstreetmap.org/search?format=json&limit=8&accept-language=ja&countrycodes=jp" +
       vb + (nearbyOnly ? "&bounded=1" : "") + "&q=" + encodeURIComponent(query))
       .then(r => r.json()).catch(() => []);
+  // 言い方のバリエーション（スペースなし版・「店」なし版）も一緒に探す
+  const variants = queryVariants(q);
   // 全部同時に問い合わせて速くする（どれかが失敗しても続行）
+  // ※Nominatimは連続アクセスに厳しいサービスなので元の言い方だけにして、
+  //   負担の軽い国土地理院とPhotonにバリエーションぶんを任せる
   const jobs = [
-    fetch("https://msearch.gsi.go.jp/address-search/AddressSearch?q=" + encodeURIComponent(q))
-      .then(r => r.json()).catch(() => []),  // 国土地理院（住所に強い）
     nomi(q, false),  // 全国から（近くを優先）
     nomi(q, true)    // 現在地の周りだけ（近所の店・バス停など）
   ];
   // 地図上は「朝倉」のように「駅」なしで登録されている駅が多いので、外した名前でも近くを探す
   if (q.endsWith("駅") && q.length > 1) jobs.push(nomi(q.slice(0, -1), true));
-  const [jobResults, nameHits] = await Promise.all([
-    Promise.all(jobs),
-    searchByName(q).catch(() => [])
+  const gsiJobs = variants.map(v =>
+    fetch("https://msearch.gsi.go.jp/address-search/AddressSearch?q=" + encodeURIComponent(v))
+      .then(r => r.json()).catch(() => []));  // 国土地理院（住所に強い）
+  const nameJobs = variants.map(v => searchByName(v).catch(() => []));
+  const [osmLists, gsiLists, nameLists] = await Promise.all([
+    Promise.all(jobs), Promise.all(gsiJobs), Promise.all(nameJobs)
   ]);
-  const [gsi, ...osmLists] = jobResults;
-  for (const f of (gsi || []).slice(0, 6)) {
-    add(f.properties.title, f.geometry.coordinates[1], f.geometry.coordinates[0]);
+  for (const gsi of gsiLists) {
+    for (const f of (gsi || []).slice(0, 6)) {
+      add(f.properties.title, f.geometry.coordinates[1], f.geometry.coordinates[0]);
+    }
   }
   for (const list of osmLists) {
     for (const h of (list || [])) {
       add(h.display_name.split(",").slice(0, 3).join("　"), parseFloat(h.lat), parseFloat(h.lon));
     }
   }
-  for (const el of nameHits) add(el.name, el.lat, el.lng);
+  for (const list of nameLists) {
+    for (const el of list) add(el.name, el.lat, el.lng);
+  }
   // 今いる場所から近い順に並べる（「イオン」だけでも近所の店が上に来る）
   for (const c of out) c.dist = haversine(lastPos[0], lastPos[1], c.lat, c.lng);
   out.sort((a, b) => a.dist - b.dist);
@@ -1197,7 +1232,7 @@ btnEvent.onclick = () => triggerEvent("イベント保存しました");
 
 async function triggerEvent(msg) {
   // 今録画中のぶんを保護対象にする
-  protectThis = true;
+  if (currentSeg) currentSeg.protect = true;
   // 直前に保存されたぶんも保護する（衝撃の少し前も残るように）
   const list = await dbList();
   if (list.length > 0) {
@@ -1305,7 +1340,9 @@ const musicSongs = [
   { title: "🔥 燃えろ！こうさか", file: "燃えろ！こうさか.mp3" },
   { title: "✨ Celebrate Tonight", file: "Celebrate Tonight.mp3" },
   { title: "🏙️ NAGOYA CITY",      file: "NAGOYA CITY.mp3" },
-  { title: "✈️ 低空飛行",          file: "低空飛行.mp3" }
+  { title: "✈️ 低空飛行",          file: "低空飛行.mp3" },
+  { title: "🎈 あぱつ",            file: "あぱつ.m4a" },
+  { title: "🚜 働くクルマ",        file: "働くクルマ.m4a" }
 ];
 const bgm = document.getElementById("bgm");
 const musicWrap = document.getElementById("musicWrap");
@@ -1374,6 +1411,11 @@ document.getElementById("musicBar").onclick = (e) => {
 (async () => {
   await openDB();
   renderList();
+  // 録画データを「重要なデータ」としてブラウザに登録する
+  //（スマホの空き容量が減ったとき、録画が勝手に消されるのを防ぐ）
+  if (navigator.storage && navigator.storage.persist) {
+    navigator.storage.persist().catch(() => {});
+  }
   // サービスワーカー登録（ホーム画面アプリ化・オフライン対応）
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw-dorareko.js").catch(()=>{});
