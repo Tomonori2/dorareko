@@ -370,8 +370,10 @@
 <!-- 録画一覧 -->
 <div class="panel">
   <h2>📼 録画一覧</h2>
+  <div id="storageInfo" class="hint" style="margin: 0 0 8px;"></div>
   <div id="clipList"></div>
   <div id="empty">まだ録画はありません</div>
+  <button id="btnDelAll" style="width:100%; margin-top:10px; background:#21262d; border:1px solid #da3633; color:#f85149; font-size:14px; padding:11px;">🗑 保護（🔒）以外の録画を全部削除</button>
 </div>
 
 <!-- 設定 -->
@@ -389,7 +391,8 @@
   </div>
   <div class="hint">
     ・録画は1分ごとのファイルに区切って保存されます<br>
-    ・「イベント保存」した録画（🔒）は自動削除されません<br>
+    ・「イベント保存」は前後の録画（前の1分・その時・あとの1分）を🔒保護します<br>
+    ・🔒保護された録画は自動削除されません<br>
     ・録画中は画面を消さないでください（消えると録画が止まります）<br>
     ・電池を多く使うので、充電しながらの使用がおすすめです<br>
     ・地図・ナビにはネット接続（モバイル通信）が必要です<br>
@@ -400,7 +403,9 @@
 
 <!-- 再生モーダル -->
 <div id="playerModal">
+  <div id="playerLabel" style="color:#fff; text-align:center; margin-bottom:8px; font-size:14px; font-weight:bold;"></div>
   <video id="playerVideo" controls playsinline></video>
+  <div class="hint" style="text-align:center; margin-top:6px;">再生が終わると、続きの録画があれば自動でつながります</div>
   <button id="playerClose">閉じる</button>
 </div>
 
@@ -435,6 +440,8 @@ let wakeLock = null;      // 画面を消さないためのロック
 let gpsWatch = null;      // GPS監視の番号
 let speedKmh = null;      // 現在の速度（km/h）GPSから
 let lastImpact = 0;       // 最後に衝撃検知した時刻（連発防止）
+let protectNextSeg = false; // イベント保存後、次の1分も保護するためのフラグ（衝撃の「あと」も残す）
+let speedUpdatedAt = 0;   // 最後にGPSで速度が取れた時刻（古い速度の焼き込み防止）
 
 // ライブ地図の状態
 let mapVisible = false;   // 地図を表示中か
@@ -581,6 +588,7 @@ async function startRecording() {
     drawLoop();
 
     // 7. 録画係を開始 ＆ 1分ごとに区切るタイマー
+    protectNextSeg = false; // 前回の録画の残りフラグを消しておく
     startSegment(mixed);
     segmentTimer = setInterval(() => rotateSegment(mixed), SEGMENT_MS);
 
@@ -622,7 +630,8 @@ function startSegment(mixed) {
   // セグメントごとに専用の入れ物（seg）を持たせる。全体で1つの変数を共有すると、
   // 前のぶんの保存が終わる前に次のセグメントが値を書き換えてしまい、
   // 「イベント保存が消える」「時刻が1分ズレる」の原因になる
-  const seg = { chunks: [], start: new Date(), protect: false };
+  const seg = { chunks: [], start: new Date(), protect: protectNextSeg };
+  protectNextSeg = false; // 保護の持ち越しは衝撃の直後の1本だけ
   currentSeg = seg;
   recorder = new MediaRecorder(mixed, mimeType ? { mimeType } : undefined);
   recorder.ondataavailable = (e) => { if (e.data.size > 0) seg.chunks.push(e.data); };
@@ -693,11 +702,20 @@ function drawLoop() {
   ctx.fillText(stamp, 12, H - bandH / 2);
 
   // 速度（右下）GPSが取れていれば表示
-  const spd = (speedKmh === null) ? "GPS待ち" : `${speedKmh} km/h`;
+  const s = currentSpeed();
+  const spd = (s === null) ? "GPS待ち" : `${s} km/h`;
   const w = ctx.measureText(spd).width;
   ctx.fillText(spd, canvas.width - w - 12, H - bandH / 2);
 
   requestAnimationFrame(drawLoop);
+}
+
+// いまの速度を返す。GPSが5秒以上途切れていたら「不明(null)」扱いにする
+// （トンネルなどでGPSが止まったとき、古い速度を映像に焼き込み続けないため。
+//   ドラレコ映像は証拠に使うので、違う速度が残るのがいちばんまずい）
+function currentSpeed() {
+  if (speedKmh === null || Date.now() - speedUpdatedAt > 5000) return null;
+  return speedKmh;
 }
 
 // ---------- GPS（速度と現在地の取得）----------
@@ -719,6 +737,7 @@ function startGPS() {
       // speed は「秒速（m/s）」で来るので時速に変換。取れない機種はnull
       if (pos.coords.speed !== null && !isNaN(pos.coords.speed)) {
         speedKmh = Math.round(pos.coords.speed * 3.6);
+        speedUpdatedAt = Date.now();
       }
       // 地図の現在地マークとナビを更新
       handlePosition(pos.coords.latitude, pos.coords.longitude);
@@ -791,7 +810,8 @@ function updateMap(lat, lng) {
   trackLine.addLatLng([lat, lng]);
   map.setView([lat, lng], mapFirstFix ? 16 : map.getZoom());
   mapFirstFix = false;
-  mapSpeedEl.textContent = (speedKmh === null ? "--" : speedKmh) + " km/h";
+  const sp = currentSpeed();
+  mapSpeedEl.textContent = (sp === null ? "--" : sp) + " km/h";
 }
 
 // ---------- カメラ画面に重ねる小さいナビ地図（ナビ中だけ）----------
@@ -1233,6 +1253,8 @@ btnEvent.onclick = () => triggerEvent("イベント保存しました");
 async function triggerEvent(msg) {
   // 今録画中のぶんを保護対象にする
   if (currentSeg) currentSeg.protect = true;
+  // 次の1分も保護する（事故なら衝撃の「あと」の映像こそ大事なので）
+  protectNextSeg = true;
   // 直前に保存されたぶんも保護する（衝撃の少し前も残るように）
   const list = await dbList();
   if (list.length > 0) {
@@ -1267,6 +1289,7 @@ async function renderList() {
   const list = await dbList();
   list.sort((a, b) => b.time.localeCompare(a.time)); // 新しい順
   emptyEl.style.display = list.length ? "none" : "block";
+  updateStorageInfo(list);
   clipList.innerHTML = "";
   for (const seg of list) {
     const d = new Date(seg.time);
@@ -1295,22 +1318,70 @@ async function renderList() {
   }
 }
 
+// 録画一覧の上に「使用中の容量・保護の件数・保存できる残り」を表示する
+async function updateStorageInfo(list) {
+  const el = document.getElementById("storageInfo");
+  if (!list.length) { el.textContent = ""; return; }
+  let total = 0, prot = 0;
+  for (const s of list) { total += s.size || 0; if (s.protected) prot++; }
+  let text = "使用中 " + (total / 1024 / 1024).toFixed(0) + " MB（🔒保護 " + prot + "件）";
+  try {
+    if (navigator.storage && navigator.storage.estimate) {
+      const est = await navigator.storage.estimate();
+      if (est && est.quota) {
+        const freeGB = (est.quota - est.usage) / 1024 / 1024 / 1024;
+        text += "・保存できる残り およそ" + (freeGB >= 10 ? Math.round(freeGB) : freeGB.toFixed(1)) + " GB";
+      }
+    }
+  } catch { /* 取れない機種でも件数と容量だけ表示 */ }
+  el.textContent = text;
+}
+
+// 「保護以外を全部削除」ボタン：ドライブ後の片付け用
+document.getElementById("btnDelAll").onclick = async () => {
+  const list = await dbList();
+  const targets = list.filter(s => !s.protected);
+  if (!targets.length) { alert("削除できる録画がありません（残っているのは🔒保護ぶんだけです）"); return; }
+  if (!confirm(targets.length + "件の録画を削除します（🔒保護ぶんは残ります）。よろしいですか？")) return;
+  for (const s of targets) await dbDelete(s.id);
+  renderList();
+};
+
 // ---------- 再生 ----------
 const playerModal = document.getElementById("playerModal");
 const playerVideo = document.getElementById("playerVideo");
 let playerURL = null;
+let playingTime = null; // いま再生中の録画の開始時刻（続き再生の判定に使う）
 
 async function playClip(id) {
   const seg = await dbGet(id);
   if (!seg) return;
+  if (playerURL) URL.revokeObjectURL(playerURL); // 前のぶんは片付ける
   playerURL = URL.createObjectURL(seg.blob);
+  playingTime = seg.time;
+  const d = new Date(seg.time);
+  const pad = n => String(n).padStart(2, "0");
+  document.getElementById("playerLabel").textContent =
+    `📼 ${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())} の録画${seg.protected ? "　🔒" : ""}`;
   playerVideo.src = playerURL;
   playerModal.classList.add("show");
   playerVideo.play().catch(()=>{});
 }
+
+// 再生が終わったら、時間的に「続き」の録画があれば自動でつなげて再生する
+// （録画は1分ごとに切れているので、事故の流れを通しで見られるように）
+playerVideo.onended = async () => {
+  if (!playerModal.classList.contains("show") || !playingTime) return;
+  const list = await dbList();
+  list.sort((a, b) => a.time.localeCompare(b.time)); // 古い順
+  const next = list.find(s => s.time > playingTime);
+  if (next) playClip(next.id);
+};
+
 document.getElementById("playerClose").onclick = () => {
   playerVideo.pause();
   playerModal.classList.remove("show");
+  playingTime = null;
   if (playerURL) { URL.revokeObjectURL(playerURL); playerURL = null; }
 };
 

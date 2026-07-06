@@ -1,6 +1,6 @@
 // スマホドラレコ サービスワーカー（オフラインで動かすための仕組み）
 // 役割：一度開いたファイルを"端末内"に保存し、次からネットなしでも開けるようにする
-const CACHE = "dorareko-v3";
+const CACHE = "dorareko-v4";
 const ASSETS = [
   "./",
   "index.html",
