@@ -389,6 +389,10 @@
     <input type="checkbox" id="chkImpact" checked>
     <span>衝撃を感じたら自動でイベント保存する</span>
   </div>
+  <div class="row">
+    <input type="checkbox" id="chkMic" checked>
+    <span>マイクの音も録音する（オフ＝音楽が止まらない）</span>
+  </div>
   <div class="hint">
     ・録画は1分ごとのファイルに区切って保存されます<br>
     ・「イベント保存」は前後の録画（前の1分・その時・あとの1分）を🔒保護します<br>
@@ -397,7 +401,8 @@
     ・電池を多く使うので、充電しながらの使用がおすすめです<br>
     ・地図・ナビにはネット接続（モバイル通信）が必要です<br>
     ・ナビは簡易版です（渋滞情報なし）。音声はスマホの音量をONに<br>
-    ・電話番号でも検索できます（OpenStreetMapに登録がある店舗のみ）
+    ・電話番号でも検索できます（OpenStreetMapに登録がある店舗のみ）<br>
+    ・車のBluetoothで音楽が止まる場合は「マイクの音も録音する」をオフに（マイクを使うと車側が通話モードに切り替わるため）
   </div>
 </div>
 
@@ -455,10 +460,13 @@ const SEG_LIMIT_MB = 0;         // （未使用・将来の容量制限用）
 // ---------- 設定の保存と読み込み ----------
 const selKeep = document.getElementById("selKeep");
 const chkImpact = document.getElementById("chkImpact");
+const chkMic = document.getElementById("chkMic");
 selKeep.value = localStorage.getItem("dr_keep") || "30";
 chkImpact.checked = localStorage.getItem("dr_impact") !== "off";
+chkMic.checked = localStorage.getItem("dr_mic") !== "off";
 selKeep.onchange = () => localStorage.setItem("dr_keep", selKeep.value);
 chkImpact.onchange = () => localStorage.setItem("dr_impact", chkImpact.checked ? "on" : "off");
+chkMic.onchange = () => localStorage.setItem("dr_mic", chkMic.checked ? "on" : "off");
 
 // ---------- 端末内データベース（IndexedDB）----------
 let db = null;
@@ -542,13 +550,15 @@ async function startRecording() {
     // 音声はecho cancellation等をオフに（Androidが「通話中」の音声モードにして
     // 音楽を止めてしまうのを防ぐため。ドラレコは通話品質より普通の録音でよい）
     // 標準の制約だけでは効かない端末があるため、Chrome独自(goog〜)の制約も一緒に指定する
+    // ※Bluetooth接続中はマイクを使うだけで車側が通話モードになり音楽が止まる。
+    //   設定「マイクの音も録音する」をオフにするとマイク自体を使わないので確実に回避できる
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: {
+      audio: chkMic.checked ? {
         echoCancellation: false, noiseSuppression: false, autoGainControl: false,
         googEchoCancellation: false, googAutoGainControl: false, googNoiseSuppression: false,
         googHighpassFilter: false, googTypingNoiseDetection: false, googAudioMirroring: false
-      }
+      } : false
     });
     if (!bgm.paused) bgm.play().catch(() => {}); // 念のため音楽の再生を取り戻す
 
@@ -601,7 +611,9 @@ async function startRecording() {
     btnEvent.disabled = false;
     videoWrap.classList.add("rec");
     recBadge.classList.add("on");
-    statusEl.textContent = "録画中（1分ごとに保存されます）";
+    statusEl.textContent = chkMic.checked
+      ? "録画中（1分ごとに保存されます）"
+      : "録画中（音声なし・音楽は止まりません）";
   } catch (err) {
     statusEl.textContent = "エラー: " + err.message + "（カメラの許可を確認してください）";
     recording = false;
