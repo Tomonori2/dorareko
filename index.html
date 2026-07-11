@@ -393,6 +393,10 @@
     <input type="checkbox" id="chkMic" checked>
     <span>マイクの音も録音する（オフ＝音楽が止まらない）</span>
   </div>
+  <div class="row">
+    <input type="checkbox" id="chkPower">
+    <span>省電力モード（画質を下げて熱くなりにくくする）</span>
+  </div>
   <div class="hint">
     ・録画は1分ごとのファイルに区切って保存されます<br>
     ・「イベント保存」は前後の録画（前の1分・その時・あとの1分）を🔒保護します<br>
@@ -402,7 +406,8 @@
     ・地図・ナビにはネット接続（モバイル通信）が必要です<br>
     ・ナビは簡易版です（渋滞情報なし）。音声はスマホの音量をONに<br>
     ・電話番号でも検索できます（OpenStreetMapに登録がある店舗のみ）<br>
-    ・車のBluetoothで音楽が止まる場合は「マイクの音も録音する」をオフに（マイクを使うと車側が通話モードに切り替わるため）
+    ・車のBluetoothで音楽が止まる場合は「マイクの音も録音する」をオフに（マイクを使うと車側が通話モードに切り替わるため）<br>
+    ・夏の車内などでスマホが熱くなって録画が止まる場合は「省電力モード」をオン＋直射日光を避けて充電しながら使ってください
   </div>
 </div>
 
@@ -447,6 +452,8 @@ let speedKmh = null;      // 現在の速度（km/h）GPSから
 let lastImpact = 0;       // 最後に衝撃検知した時刻（連発防止）
 let protectNextSeg = false; // イベント保存後、次の1分も保護するためのフラグ（衝撃の「あと」も残す）
 let speedUpdatedAt = 0;   // 最後にGPSで速度が取れた時刻（古い速度の焼き込み防止）
+let captureFps = 24;      // 録画のコマ数（省電力モードで下げる）
+let lastDrawAt = 0;       // 最後に1コマ描いた時刻（描画を録画コマ数に合わせて間引く）
 
 // ライブ地図の状態
 let mapVisible = false;   // 地図を表示中か
@@ -461,12 +468,15 @@ const SEG_LIMIT_MB = 0;         // （未使用・将来の容量制限用）
 const selKeep = document.getElementById("selKeep");
 const chkImpact = document.getElementById("chkImpact");
 const chkMic = document.getElementById("chkMic");
+const chkPower = document.getElementById("chkPower");
 selKeep.value = localStorage.getItem("dr_keep") || "30";
 chkImpact.checked = localStorage.getItem("dr_impact") !== "off";
 chkMic.checked = localStorage.getItem("dr_mic") !== "off";
+chkPower.checked = localStorage.getItem("dr_power") === "on"; // 初期はオフ（画質優先）
 selKeep.onchange = () => localStorage.setItem("dr_keep", selKeep.value);
 chkImpact.onchange = () => localStorage.setItem("dr_impact", chkImpact.checked ? "on" : "off");
 chkMic.onchange = () => localStorage.setItem("dr_mic", chkMic.checked ? "on" : "off");
+chkPower.onchange = () => localStorage.setItem("dr_power", chkPower.checked ? "on" : "off");
 
 // ---------- 端末内データベース（IndexedDB）----------
 let db = null;
@@ -552,8 +562,14 @@ async function startRecording() {
     // 標準の制約だけでは効かない端末があるため、Chrome独自(goog〜)の制約も一緒に指定する
     // ※Bluetooth接続中はマイクを使うだけで車側が通話モードになり音楽が止まる。
     //   設定「マイクの音も録音する」をオフにするとマイク自体を使わないので確実に回避できる
+    // 省電力モードのときは解像度・コマ数を下げて発熱と電池消費を抑える
+    // （通常720p/24コマ → 省電力480p/15コマ。ドラレコは高fpsより連続録画が大事）
+    captureFps = chkPower.checked ? 15 : 24;
+    const videoRes = chkPower.checked
+      ? { width: { ideal: 640 }, height: { ideal: 480 } }
+      : { width: { ideal: 1280 }, height: { ideal: 720 } };
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      video: { facingMode: "environment", frameRate: { ideal: captureFps }, ...videoRes },
       audio: chkMic.checked ? {
         echoCancellation: false, noiseSuppression: false, autoGainControl: false,
         googEchoCancellation: false, googAutoGainControl: false, googNoiseSuppression: false,
@@ -580,7 +596,7 @@ async function startRecording() {
     if (chkImpact.checked) await startImpactSensor();
 
     // 5. キャンバス映像＋マイク音声を合体して録画の元にする
-    const canvasStream = canvas.captureStream(30);
+    const canvasStream = canvas.captureStream(captureFps);
     const mixed = new MediaStream([
       ...canvasStream.getVideoTracks(),
       ...stream.getAudioTracks()
@@ -692,8 +708,15 @@ async function cleanupOld() {
 }
 
 // ---------- 映像への焼き込み（日時・速度）----------
-function drawLoop() {
+function drawLoop(ts) {
   if (!recording) return;
+  requestAnimationFrame(drawLoop);
+  // 画面は60コマ/秒で更新されるが、録画はcaptureFps（15〜24）で十分。
+  // 録画のコマ数に合わせて描画を間引き、無駄なCPU使用＝発熱を抑える
+  const tNow = ts || performance.now();
+  if (tNow - lastDrawAt < 1000 / captureFps) return;
+  lastDrawAt = tNow;
+
   // カメラ映像をそのまま描く
   ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
 
@@ -718,8 +741,6 @@ function drawLoop() {
   const spd = (s === null) ? "GPS待ち" : `${s} km/h`;
   const w = ctx.measureText(spd).width;
   ctx.fillText(spd, canvas.width - w - 12, H - bandH / 2);
-
-  requestAnimationFrame(drawLoop);
 }
 
 // いまの速度を返す。GPSが5秒以上途切れていたら「不明(null)」扱いにする
